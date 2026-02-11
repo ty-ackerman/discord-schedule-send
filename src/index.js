@@ -103,7 +103,85 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // ── Edit button ────────────────────────────────────────────────────
+      // ── Cancel button (from schedule-list) ──────────────────────────────
+      if (customId.startsWith('list_cancel_')) {
+        const messageId = parseInt(customId.replace('list_cancel_', ''), 10);
+        const deleted = db.cancelMessage(messageId, interaction.user.id);
+
+        if (deleted) {
+          // Refresh the list with the cancelled message removed
+          const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
+          const response = buildScheduleListResponse(remaining);
+
+          if (remaining.length === 0) {
+            const embed = new EmbedBuilder()
+              .setColor(0xed4245)
+              .setTitle('Message Cancelled')
+              .setDescription(`Scheduled message **#${messageId}** has been cancelled.\n\nYou have no more scheduled messages.`);
+
+            await interaction.update({ embeds: [embed], components: [] });
+          } else {
+            await interaction.update({
+              content: `Scheduled message **#${messageId}** has been cancelled.`,
+              ...response,
+            });
+          }
+        } else {
+          // Already sent or cancelled — just refresh the list
+          const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
+          const response = buildScheduleListResponse(remaining);
+          await interaction.update({
+            content: `Message **#${messageId}** was already sent or cancelled.`,
+            ...response,
+          });
+        }
+        return;
+      }
+
+      // ── Edit button (from schedule-list) ────────────────────────────────
+      if (customId.startsWith('list_edit_')) {
+        const messageId = parseInt(customId.replace('list_edit_', ''), 10);
+        const msg = db.getMessageById(messageId);
+
+        if (!msg || msg.user_id !== interaction.user.id) {
+          // Message gone — refresh the list
+          const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
+          const response = buildScheduleListResponse(remaining);
+          await interaction.update({
+            content: `Message **#${messageId}** has already been sent or cancelled.`,
+            ...response,
+          });
+          return;
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId(`edit_modal_${messageId}`)
+          .setTitle(`Edit Scheduled Message #${messageId}`);
+
+        const messageInput = new TextInputBuilder()
+          .setCustomId('edited_message')
+          .setLabel('Message')
+          .setStyle(TextInputStyle.Paragraph)
+          .setValue(msg.message)
+          .setRequired(true);
+
+        const timeInput = new TextInputBuilder()
+          .setCustomId('edited_time')
+          .setLabel('New time (leave unchanged to keep current)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('e.g. tomorrow at 3pm')
+          .setRequired(false);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(messageInput),
+          new ActionRowBuilder().addComponents(timeInput),
+        );
+
+        await interaction.showModal(modal);
+        return;
+      }
+
+      // ── Edit button (from confirmation embed) ──────────────────────────
       if (customId.startsWith('edit_schedule_')) {
         const messageId = parseInt(customId.replace('edit_schedule_', ''), 10);
         const msg = db.getMessageById(messageId);
@@ -415,15 +493,15 @@ async function handleSchedule(interaction) {
   await interaction.showModal(modal);
 }
 
-// ─── /schedule-list ──────────────────────────────────────────────────────────
-async function handleScheduleList(interaction) {
-  const messages = db.getUserMessages(interaction.guildId, interaction.user.id);
-
+// ─── Schedule list helper (shared by /schedule-list and list button handlers) ─
+function buildScheduleListResponse(messages) {
   if (messages.length === 0) {
-    return interaction.reply({
+    return {
       content: "You don't have any scheduled messages.",
+      embeds: [],
+      components: [],
       ephemeral: true,
-    });
+    };
   }
 
   const lines = messages.map((msg) => {
@@ -434,10 +512,35 @@ async function handleScheduleList(interaction) {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle('Your Scheduled Messages')
-    .setDescription(lines.join('\n\n'))
-    .setFooter({ text: 'Use /schedule-cancel id:<number> to cancel one' });
+    .setDescription(lines.join('\n\n'));
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  // Add Edit / Cancel buttons for each message (max 5 due to Discord's ActionRow limit)
+  const components = messages.slice(0, 5).map((msg) =>
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`list_edit_${msg.id}`)
+        .setLabel(`Edit #${msg.id}`)
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('✏️'),
+      new ButtonBuilder()
+        .setCustomId(`list_cancel_${msg.id}`)
+        .setLabel(`Cancel #${msg.id}`)
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('🗑️'),
+    )
+  );
+
+  if (messages.length > 5) {
+    embed.setFooter({ text: `Showing buttons for the first 5 messages. Use /schedule-cancel id:<number> for the rest.` });
+  }
+
+  return { embeds: [embed], components, ephemeral: true };
+}
+
+// ─── /schedule-list ──────────────────────────────────────────────────────────
+async function handleScheduleList(interaction) {
+  const messages = db.getUserMessages(interaction.guildId, interaction.user.id);
+  await interaction.reply(buildScheduleListResponse(messages));
 }
 
 // ─── /schedule-cancel ────────────────────────────────────────────────────────
