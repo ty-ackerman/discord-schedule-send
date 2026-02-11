@@ -30,7 +30,7 @@ const client = new Client({
 });
 
 // ─── Bot ready ───────────────────────────────────────────────────────────────
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`Bot is online as ${client.user.tag}`);
   console.log(`Checking for scheduled messages every 15 seconds...`);
 
@@ -669,6 +669,8 @@ async function checkScheduledMessages() {
       }
     } catch (error) {
       console.error(`Failed to send message #${msg.id}:`, error.message);
+      await notifyUserOfFailure(msg.user_id, msg, 'An unexpected error occurred while sending the message.');
+      db.deleteMessage(msg.id);
     }
 
     if (sent) {
