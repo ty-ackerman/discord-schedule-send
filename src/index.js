@@ -144,6 +144,104 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // ── Modal submit (schedule) ────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('schedule_modal_')) {
+    try {
+      const channelId = interaction.customId.replace('schedule_modal_', '');
+      const messageText = interaction.fields.getTextInputValue('schedule_message');
+      const timeInput = interaction.fields.getTextInputValue('schedule_time').trim();
+
+      // Use the user's personal timezone if set, otherwise fall back to the server default
+      const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
+
+      // Parse the natural language time in the resolved timezone
+      const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone }, { forwardDate: true });
+
+      if (!parsedDate) {
+        await interaction.reply({
+          content: `I couldn't understand the time **"${timeInput}"**. Try something like:\n` +
+            '• "tomorrow at 3pm"\n• "in 2 hours"\n• "Friday at noon"\n• "March 5 at 10:30am"',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (parsedDate <= new Date()) {
+        await interaction.reply({
+          content: `That time is in the past. Please pick a future time.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const channel = await client.channels.fetch(channelId);
+
+      // Warn if missing Manage Webhooks permission
+      let permWarning = '';
+      const botPermissions = channel.permissionsFor(interaction.guild.members.me);
+      if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
+        permWarning = `\n\n⚠️ I don't have **Manage Webhooks** permission in <#${channelId}>, so the message will be sent as the bot instead of appearing as you.`;
+      }
+
+      // Capture user identity
+      const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
+      const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
+
+      // Save to database
+      const id = db.addScheduledMessage({
+        guildId: interaction.guildId,
+        channelId,
+        userId: interaction.user.id,
+        message: messageText,
+        sendAt: parsedDate,
+        userDisplayName,
+        userAvatarUrl,
+      });
+
+      const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle('Message Scheduled')
+        .addFields(
+          { name: 'Message', value: messageText },
+          { name: 'Channel', value: `<#${channelId}>` },
+          { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
+          { name: 'ID', value: `${id}`, inline: true },
+        )
+        .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`edit_schedule_${id}`)
+          .setLabel('Edit')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('✏️'),
+        new ButtonBuilder()
+          .setCustomId(`cancel_schedule_${id}`)
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Danger)
+          .setEmoji('🗑️'),
+      );
+
+      await interaction.reply({
+        content: permWarning || undefined,
+        embeds: [embed],
+        components: [buttons],
+        ephemeral: true,
+      });
+    } catch (error) {
+      console.error('Error handling schedule modal submit:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: 'Something went wrong while scheduling your message. Please try again.',
+          ephemeral: true,
+        });
+      }
+    }
+    return;
+  }
+
   // ── Modal submit (edit) ──────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_modal_')) {
     try {
@@ -165,8 +263,8 @@ client.on('interactionCreate', async (interaction) => {
       let newSendAt = msg.send_at; // default: keep existing time
 
       if (newTimeInput) {
-        const userTimezone = db.getUserTimezone(interaction.user.id);
-        const parsedDate = chrono.parseDate(newTimeInput, { instant: new Date(), timezone: userTimezone || undefined }, { forwardDate: true });
+        const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
+        const parsedDate = chrono.parseDate(newTimeInput, { instant: new Date(), timezone }, { forwardDate: true });
 
         if (!parsedDate) {
           await interaction.reply({
@@ -264,96 +362,34 @@ async function handleScheduleTimezone(interaction) {
   });
 }
 
-// ─── /schedule ───────────────────────────────────────────────────────────────
+// ─── /schedule — show modal ──────────────────────────────────────────────────
 async function handleSchedule(interaction) {
-  const messageText = interaction.options.getString('message');
-  const timeInput = interaction.options.getString('time');
   const channel = interaction.options.getChannel('channel') || interaction.channel;
 
-  // Use the user's personal timezone if set, otherwise fall back to the server default
-  const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
+  const modal = new ModalBuilder()
+    .setCustomId(`schedule_modal_${channel.id}`)
+    .setTitle('Schedule a Message');
 
-  // Parse the natural language time in the resolved timezone
-  const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone }, { forwardDate: true });
+  const messageInput = new TextInputBuilder()
+    .setCustomId('schedule_message')
+    .setLabel('Message')
+    .setStyle(TextInputStyle.Paragraph)
+    .setPlaceholder('Type your message here...')
+    .setRequired(true);
 
-  if (!parsedDate) {
-    return interaction.reply({
-      content: `I couldn't understand the time **"${timeInput}"**. Try something like:\n` +
-        '• "tomorrow at 3pm"\n• "in 2 hours"\n• "Friday at noon"\n• "March 5 at 10:30am"',
-      ephemeral: true,
-    });
-  }
+  const timeInput = new TextInputBuilder()
+    .setCustomId('schedule_time')
+    .setLabel('When to send it')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('e.g. tomorrow at 9am, in 2 hours, Friday at noon')
+    .setRequired(true);
 
-  // Make sure the time is in the future
-  if (parsedDate <= new Date()) {
-    return interaction.reply({
-      content: `That time is in the past. Please pick a future time.`,
-      ephemeral: true,
-    });
-  }
-
-  // Warn (but don't block) if the bot is missing Manage Webhooks permission
-  const botPermissions = channel.permissionsFor(interaction.guild.members.me);
-  if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
-    // Still schedule it — the fallback will send as the bot — but let the user know
-    await interaction.reply({
-      content:
-        `⚠️ I don't have **Manage Webhooks** permission in <#${channel.id}>, so the message ` +
-        `will be sent as the bot instead of appearing as you. To fix this, grant the bot ` +
-        `"Manage Webhooks" in that channel's permissions.\n\n` +
-        `The message has still been scheduled — it just won't look like it came from you.`,
-      ephemeral: true,
-    });
-  }
-
-  // Capture user identity so the scheduled message looks like it came from them
-  const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
-  const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
-
-  // Save to database
-  const id = db.addScheduledMessage({
-    guildId: interaction.guildId,
-    channelId: channel.id,
-    userId: interaction.user.id,
-    message: messageText,
-    sendAt: parsedDate,
-    userDisplayName,
-    userAvatarUrl,
-  });
-
-  // Use Discord's built-in timestamp format so it renders in each user's local timezone
-  const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
-
-  const embed = new EmbedBuilder()
-    .setColor(0x57f287)
-    .setTitle('Message Scheduled')
-    .addFields(
-      { name: 'Message', value: messageText },
-      { name: 'Channel', value: `<#${channel.id}>` },
-      { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
-      { name: 'ID', value: `${id}`, inline: true },
-    )
-    .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
-
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`edit_schedule_${id}`)
-      .setLabel('Edit')
-      .setStyle(ButtonStyle.Primary)
-      .setEmoji('✏️'),
-    new ButtonBuilder()
-      .setCustomId(`cancel_schedule_${id}`)
-      .setLabel('Cancel')
-      .setStyle(ButtonStyle.Danger)
-      .setEmoji('🗑️'),
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(messageInput),
+    new ActionRowBuilder().addComponents(timeInput),
   );
 
-  // If we already replied with a permission warning, follow up instead
-  if (interaction.replied) {
-    await interaction.followUp({ embeds: [embed], components: [buttons], ephemeral: true });
-  } else {
-    await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
-  }
+  await interaction.showModal(modal);
 }
 
 // ─── /schedule-list ──────────────────────────────────────────────────────────

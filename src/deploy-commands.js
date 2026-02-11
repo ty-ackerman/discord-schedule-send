@@ -5,18 +5,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName('schedule')
     .setDescription('Schedule a message to be sent later')
-    .addStringOption(option =>
-      option
-        .setName('message')
-        .setDescription('The message you want to send')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName('time')
-        .setDescription('When to send it (e.g. "tomorrow at 3pm", "in 2 hours", "March 5 at noon")')
-        .setRequired(true)
-    )
     .addChannelOption(option =>
       option
         .setName('channel')
