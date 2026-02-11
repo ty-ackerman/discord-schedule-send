@@ -1,12 +1,8 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const chrono = require('chrono-node');
-const dayjs = require('dayjs');
-const relativeTime = require('dayjs/plugin/relativeTime');
 const http = require('http');
 const db = require('./database');
 require('dotenv').config();
-
-dayjs.extend(relativeTime);
 
 // ─── Health check server (keeps Railway from sleeping) ───────────────────────
 const PORT = process.env.PORT || 3000;
@@ -88,6 +84,20 @@ async function handleSchedule(interaction) {
     });
   }
 
+  // Warn (but don't block) if the bot is missing Manage Webhooks permission
+  const botPermissions = channel.permissionsFor(interaction.guild.members.me);
+  if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
+    // Still schedule it — the fallback will send as the bot — but let the user know
+    await interaction.reply({
+      content:
+        `⚠️ I don't have **Manage Webhooks** permission in <#${channel.id}>, so the message ` +
+        `will be sent as the bot instead of appearing as you. To fix this, grant the bot ` +
+        `"Manage Webhooks" in that channel's permissions.\n\n` +
+        `The message has still been scheduled — it just won't look like it came from you.`,
+      ephemeral: true,
+    });
+  }
+
   // Capture user identity so the scheduled message looks like it came from them
   const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
   const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
@@ -103,8 +113,8 @@ async function handleSchedule(interaction) {
     userAvatarUrl,
   });
 
-  const formattedTime = dayjs(parsedDate).format('dddd, MMMM D, YYYY [at] h:mm A');
-  const relTime = dayjs(parsedDate).fromNow();
+  // Use Discord's built-in timestamp format so it renders in each user's local timezone
+  const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
 
   const embed = new EmbedBuilder()
     .setColor(0x57f287)
@@ -112,12 +122,17 @@ async function handleSchedule(interaction) {
     .addFields(
       { name: 'Message', value: messageText },
       { name: 'Channel', value: `<#${channel.id}>` },
-      { name: 'Sends at', value: `${formattedTime} (${relTime})` },
+      { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
       { name: 'ID', value: `${id}`, inline: true },
     )
     .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  // If we already replied with a permission warning, follow up instead
+  if (interaction.replied) {
+    await interaction.followUp({ embeds: [embed], ephemeral: true });
+  } else {
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 }
 
 // ─── /schedule-list ──────────────────────────────────────────────────────────
@@ -132,11 +147,8 @@ async function handleScheduleList(interaction) {
   }
 
   const lines = messages.map((msg) => {
-    const sendAt = dayjs(msg.send_at * 1000);
-    const formatted = sendAt.format('ddd, MMM D [at] h:mm A');
-    const relative = sendAt.fromNow();
     const preview = msg.message.length > 50 ? msg.message.slice(0, 50) + '...' : msg.message;
-    return `**#${msg.id}** — ${formatted} (${relative})\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
+    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
   });
 
   const embed = new EmbedBuilder()
@@ -186,35 +198,79 @@ async function getOrCreateWebhook(channel) {
   });
 }
 
+// ─── Notify user of a delivery failure via DM ───────────────────────────────
+async function notifyUserOfFailure(userId, msg, errorMessage) {
+  try {
+    const user = await client.users.fetch(userId);
+    const preview = msg.message.length > 100 ? msg.message.slice(0, 100) + '...' : msg.message;
+    await user.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('Scheduled Message Failed to Send')
+          .setDescription(
+            `Your scheduled message could not be delivered to <#${msg.channel_id}>.\n\n` +
+            `**Error:** ${errorMessage}\n\n` +
+            `**Your message was:**\n> ${preview}`
+          )
+          .setFooter({ text: 'Try rescheduling with /schedule, and make sure the bot has "Manage Webhooks" permission in that channel.' }),
+      ],
+    });
+  } catch (dmError) {
+    console.error(`Could not DM user ${userId} about failure:`, dmError.message);
+  }
+}
+
 // ─── Scheduler: checks every 15 seconds for due messages ────────────────────
 async function checkScheduledMessages() {
   const dueMessages = db.getDueMessages();
 
   for (const msg of dueMessages) {
+    let sent = false;
+
     try {
       const channel = await client.channels.fetch(msg.channel_id);
       if (!channel) {
         console.warn(`Channel ${msg.channel_id} not found, skipping message #${msg.id}`);
+        await notifyUserOfFailure(msg.user_id, msg, 'The channel no longer exists or the bot cannot access it.');
         db.deleteMessage(msg.id);
         continue;
       }
 
-      // Use a webhook so the message appears with the user's name and avatar
-      const webhook = await getOrCreateWebhook(channel);
-      await webhook.send({
-        content: msg.message,
-        username: msg.user_display_name || 'Scheduled Message',
-        avatarURL: msg.user_avatar_url || undefined,
-      });
+      // Try sending via webhook first (shows user's name and avatar)
+      try {
+        const webhook = await getOrCreateWebhook(channel);
+        await webhook.send({
+          content: msg.message,
+          username: msg.user_display_name || 'Scheduled Message',
+          avatarURL: msg.user_avatar_url || undefined,
+        });
+        sent = true;
+        console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}" (via webhook)`);
+      } catch (webhookError) {
+        console.warn(`Webhook failed for message #${msg.id}: ${webhookError.message}. Falling back to channel.send()...`);
 
-      console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}"`);
+        // Fallback: send as the bot (better than not sending at all)
+        try {
+          const fallbackLabel = msg.user_display_name ? ` (scheduled by ${msg.user_display_name})` : '';
+          await channel.send(`${msg.message}${fallbackLabel}`);
+          sent = true;
+          console.log(`Sent scheduled message #${msg.id} to #${channel.name} via fallback (channel.send)`);
+        } catch (sendError) {
+          console.error(`Fallback also failed for message #${msg.id}:`, sendError.message);
+        }
+      }
     } catch (error) {
       console.error(`Failed to send message #${msg.id}:`, error.message);
     }
 
-    // Delete the message from the database whether it sent or not
-    // (to avoid retrying broken messages forever)
-    db.deleteMessage(msg.id);
+    if (sent) {
+      db.deleteMessage(msg.id);
+    } else {
+      // Notify the user their message failed, then delete so we don't retry forever
+      await notifyUserOfFailure(msg.user_id, msg, 'The bot could not send the message. Please check that it has Send Messages and Manage Webhooks permissions in the channel.');
+      db.deleteMessage(msg.id);
+    }
   }
 }
 
