@@ -26,6 +26,14 @@ try {
   db.exec(`ALTER TABLE scheduled_messages ADD COLUMN user_avatar_url TEXT`);
 } catch (_) { /* column already exists */ }
 
+// User timezone preferences
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_timezones (
+    user_id TEXT PRIMARY KEY,
+    timezone TEXT NOT NULL
+  )
+`);
+
 /**
  * Save a new scheduled message to the database.
  * @returns The inserted row's id.
@@ -78,10 +86,58 @@ function cancelMessage(id, userId) {
   return result.changes > 0;
 }
 
+/**
+ * Get a single scheduled message by its id.
+ * @returns The message row, or undefined if not found.
+ */
+function getMessageById(id) {
+  const stmt = db.prepare(`SELECT * FROM scheduled_messages WHERE id = ?`);
+  return stmt.get(id);
+}
+
+/**
+ * Update the message text and/or send time for a scheduled message (only if the user owns it).
+ * @returns true if a row was updated, false otherwise.
+ */
+function updateMessage(id, userId, { message, sendAt }) {
+  const stmt = db.prepare(`
+    UPDATE scheduled_messages
+    SET message = ?, send_at = ?
+    WHERE id = ? AND user_id = ?
+  `);
+  const result = stmt.run(message, sendAt, id, userId);
+  return result.changes > 0;
+}
+
+/**
+ * Save or update a user's timezone preference.
+ */
+function setUserTimezone(userId, timezone) {
+  const stmt = db.prepare(`
+    INSERT INTO user_timezones (user_id, timezone)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET timezone = excluded.timezone
+  `);
+  stmt.run(userId, timezone);
+}
+
+/**
+ * Get a user's timezone preference (or null if not set).
+ */
+function getUserTimezone(userId) {
+  const stmt = db.prepare(`SELECT timezone FROM user_timezones WHERE user_id = ?`);
+  const row = stmt.get(userId);
+  return row ? row.timezone : null;
+}
+
 module.exports = {
   addScheduledMessage,
   getDueMessages,
   deleteMessage,
   getUserMessages,
   cancelMessage,
+  getMessageById,
+  updateMessage,
+  setUserTimezone,
+  getUserTimezone,
 };

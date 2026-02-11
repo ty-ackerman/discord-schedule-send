@@ -1,4 +1,15 @@
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require('discord.js');
 const chrono = require('chrono-node');
 const http = require('http');
 const db = require('./database');
@@ -42,6 +53,9 @@ client.on('interactionCreate', async (interaction) => {
       case 'schedule-cancel':
         await handleScheduleCancel(interaction);
         break;
+      case 'schedule-timezone':
+        await handleScheduleTimezone(interaction);
+        break;
     }
   } catch (error) {
     console.error(`Error handling /${interaction.commandName}:`, error);
@@ -59,14 +73,208 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ─── Handle button interactions (Cancel / Edit) ─────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton()) {
+    try {
+      const customId = interaction.customId;
+
+      // ── Cancel button ──────────────────────────────────────────────────
+      if (customId.startsWith('cancel_schedule_')) {
+        const messageId = parseInt(customId.replace('cancel_schedule_', ''), 10);
+        const deleted = db.cancelMessage(messageId, interaction.user.id);
+
+        if (deleted) {
+          const embed = new EmbedBuilder()
+            .setColor(0xed4245)
+            .setTitle('Message Cancelled')
+            .setDescription(`Scheduled message **#${messageId}** has been cancelled and will not be sent.`);
+
+          await interaction.update({ embeds: [embed], components: [] });
+        } else {
+          await interaction.reply({
+            content: `Could not cancel message **#${messageId}**. It may have already been sent or cancelled.`,
+            ephemeral: true,
+          });
+        }
+        return;
+      }
+
+      // ── Edit button ────────────────────────────────────────────────────
+      if (customId.startsWith('edit_schedule_')) {
+        const messageId = parseInt(customId.replace('edit_schedule_', ''), 10);
+        const msg = db.getMessageById(messageId);
+
+        if (!msg || msg.user_id !== interaction.user.id) {
+          await interaction.reply({
+            content: `Could not find message **#${messageId}**. It may have already been sent or cancelled.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId(`edit_modal_${messageId}`)
+          .setTitle(`Edit Scheduled Message #${messageId}`);
+
+        const messageInput = new TextInputBuilder()
+          .setCustomId('edited_message')
+          .setLabel('Message')
+          .setStyle(TextInputStyle.Paragraph)
+          .setValue(msg.message)
+          .setRequired(true);
+
+        const timeInput = new TextInputBuilder()
+          .setCustomId('edited_time')
+          .setLabel('New time (leave unchanged to keep current)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('e.g. tomorrow at 3pm')
+          .setRequired(false);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(messageInput),
+          new ActionRowBuilder().addComponents(timeInput),
+        );
+
+        await interaction.showModal(modal);
+        return;
+      }
+    } catch (error) {
+      console.error('Error handling button interaction:', error);
+    }
+  }
+
+  // ── Modal submit (edit) ──────────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('edit_modal_')) {
+    try {
+      const messageId = parseInt(interaction.customId.replace('edit_modal_', ''), 10);
+      const msg = db.getMessageById(messageId);
+
+      if (!msg || msg.user_id !== interaction.user.id) {
+        await interaction.reply({
+          content: `Could not find message **#${messageId}**. It may have already been sent or cancelled.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const newMessage = interaction.fields.getTextInputValue('edited_message');
+      const newTimeInput = interaction.fields.getTextInputValue('edited_time').trim();
+
+      // Determine the new send time
+      let newSendAt = msg.send_at; // default: keep existing time
+
+      if (newTimeInput) {
+        const userTimezone = db.getUserTimezone(interaction.user.id);
+        const parsedDate = chrono.parseDate(newTimeInput, { instant: new Date(), timezone: userTimezone || undefined }, { forwardDate: true });
+
+        if (!parsedDate) {
+          await interaction.reply({
+            content: `I couldn't understand the time **"${newTimeInput}"**. The message was not updated.\n\n` +
+              'Try something like: "tomorrow at 3pm", "in 2 hours", "Friday at noon"',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (parsedDate <= new Date()) {
+          await interaction.reply({
+            content: `That time is in the past. The message was not updated.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        newSendAt = Math.floor(parsedDate.getTime() / 1000);
+      }
+
+      const updated = db.updateMessage(messageId, interaction.user.id, {
+        message: newMessage,
+        sendAt: newSendAt,
+      });
+
+      if (updated) {
+        const embed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle('Message Updated')
+          .addFields(
+            { name: 'Message', value: newMessage },
+            { name: 'Channel', value: `<#${msg.channel_id}>` },
+            { name: 'Sends at', value: `<t:${newSendAt}:F> (<t:${newSendAt}:R>)` },
+            { name: 'ID', value: `${messageId}`, inline: true },
+          )
+          .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
+
+        const buttons = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`edit_schedule_${messageId}`)
+            .setLabel('Edit')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('✏️'),
+          new ButtonBuilder()
+            .setCustomId(`cancel_schedule_${messageId}`)
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('🗑️'),
+        );
+
+        await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+      } else {
+        await interaction.reply({
+          content: `Could not update message **#${messageId}**. It may have already been sent or cancelled.`,
+          ephemeral: true,
+        });
+      }
+    } catch (error) {
+      console.error('Error handling modal submit:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: 'Something went wrong while updating your message. Please try again.',
+          ephemeral: true,
+        });
+      }
+    }
+  }
+});
+
+// ─── Default timezone (from .env) ────────────────────────────────────────────
+const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'UTC';
+
+// ─── /schedule-timezone ──────────────────────────────────────────────────────
+async function handleScheduleTimezone(interaction) {
+  const timezone = interaction.options.getString('timezone');
+  db.setUserTimezone(interaction.user.id, timezone);
+
+  // Show the current time in their chosen timezone as confirmation
+  const now = Math.floor(Date.now() / 1000);
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle('Timezone Updated')
+        .setDescription(
+          `Your personal timezone has been set to **${timezone}**.\n\n` +
+          `Current time for you: <t:${now}:F>\n\n` +
+          `This overrides the server default (**${DEFAULT_TIMEZONE}**). ` +
+          `All your scheduled messages will now use **${timezone}**.`
+        ),
+    ],
+    ephemeral: true,
+  });
+}
+
 // ─── /schedule ───────────────────────────────────────────────────────────────
 async function handleSchedule(interaction) {
   const messageText = interaction.options.getString('message');
   const timeInput = interaction.options.getString('time');
   const channel = interaction.options.getChannel('channel') || interaction.channel;
 
-  // Parse the natural language time
-  const parsedDate = chrono.parseDate(timeInput, new Date(), { forwardDate: true });
+  // Use the user's personal timezone if set, otherwise fall back to the server default
+  const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
+
+  // Parse the natural language time in the resolved timezone
+  const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone }, { forwardDate: true });
 
   if (!parsedDate) {
     return interaction.reply({
@@ -127,11 +335,24 @@ async function handleSchedule(interaction) {
     )
     .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
 
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`edit_schedule_${id}`)
+      .setLabel('Edit')
+      .setStyle(ButtonStyle.Primary)
+      .setEmoji('✏️'),
+    new ButtonBuilder()
+      .setCustomId(`cancel_schedule_${id}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger)
+      .setEmoji('🗑️'),
+  );
+
   // If we already replied with a permission warning, follow up instead
   if (interaction.replied) {
-    await interaction.followUp({ embeds: [embed], ephemeral: true });
+    await interaction.followUp({ embeds: [embed], components: [buttons], ephemeral: true });
   } else {
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
   }
 }
 
