@@ -92,10 +92,13 @@ client.on('interactionCreate', async (interaction) => {
 
           await interaction.update({ embeds: [embed], components: [] });
         } else {
-          await interaction.reply({
-            content: `Could not cancel message **#${messageId}**. It may have already been sent or cancelled.`,
-            ephemeral: true,
-          });
+          // Message already sent or cancelled — clean up the stale buttons
+          const embed = new EmbedBuilder()
+            .setColor(0x2b2d31)
+            .setTitle('Message Sent ✓')
+            .setDescription(`This message has already been sent or cancelled.`);
+
+          await interaction.update({ embeds: [embed], components: [] });
         }
         return;
       }
@@ -106,10 +109,13 @@ client.on('interactionCreate', async (interaction) => {
         const msg = db.getMessageById(messageId);
 
         if (!msg || msg.user_id !== interaction.user.id) {
-          await interaction.reply({
-            content: `Could not find message **#${messageId}**. It may have already been sent or cancelled.`,
-            ephemeral: true,
-          });
+          // Message already sent or cancelled — clean up the stale buttons
+          const embed = new EmbedBuilder()
+            .setColor(0x2b2d31)
+            .setTitle('Message Sent ✓')
+            .setDescription(`This message has already been sent or cancelled.`);
+
+          await interaction.update({ embeds: [embed], components: [] });
           return;
         }
 
@@ -153,9 +159,10 @@ client.on('interactionCreate', async (interaction) => {
 
       // Use the user's personal timezone if set, otherwise fall back to the server default
       const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
+      const timezoneOffset = getTimezoneOffsetMinutes(timezone);
 
       // Parse the natural language time in the resolved timezone
-      const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone }, { forwardDate: true });
+      const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone: timezoneOffset }, { forwardDate: true });
 
       if (!parsedDate) {
         await interaction.reply({
@@ -187,7 +194,7 @@ client.on('interactionCreate', async (interaction) => {
       const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
       const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
 
-      // Save to database
+      // Save to database (include interaction token so we can clean up buttons after send)
       const id = db.addScheduledMessage({
         guildId: interaction.guildId,
         channelId,
@@ -196,6 +203,7 @@ client.on('interactionCreate', async (interaction) => {
         sendAt: parsedDate,
         userDisplayName,
         userAvatarUrl,
+        interactionToken: interaction.token,
       });
 
       const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
@@ -264,7 +272,8 @@ client.on('interactionCreate', async (interaction) => {
 
       if (newTimeInput) {
         const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
-        const parsedDate = chrono.parseDate(newTimeInput, { instant: new Date(), timezone }, { forwardDate: true });
+        const timezoneOffset = getTimezoneOffsetMinutes(timezone);
+        const parsedDate = chrono.parseDate(newTimeInput, { instant: new Date(), timezone: timezoneOffset }, { forwardDate: true });
 
         if (!parsedDate) {
           await interaction.reply({
@@ -337,6 +346,20 @@ client.on('interactionCreate', async (interaction) => {
 
 // ─── Default timezone (from .env) ────────────────────────────────────────────
 const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'UTC';
+
+/**
+ * Convert an IANA timezone name (e.g. "America/New_York") to a numeric UTC
+ * offset in minutes that chrono-node reliably understands.
+ *
+ * chrono-node accepts IANA strings in theory, but on UTC-based servers (like
+ * Railway) it can silently fall back to UTC.  A numeric offset always works.
+ */
+function getTimezoneOffsetMinutes(timezoneName) {
+  const now = new Date();
+  const utcDate = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+  const tzDate  = new Date(now.toLocaleString('en-US', { timeZone: timezoneName }));
+  return Math.round((tzDate - utcDate) / 60000);
+}
 
 // ─── /schedule-timezone ──────────────────────────────────────────────────────
 async function handleScheduleTimezone(interaction) {
@@ -478,6 +501,30 @@ async function notifyUserOfFailure(userId, msg, errorMessage) {
   }
 }
 
+// ─── Clean up the confirmation embed after a message is sent ─────────────────
+async function cleanUpConfirmationEmbed(msg) {
+  if (!msg.interaction_token) return;
+
+  try {
+    // Edit the original interaction response to remove buttons and mark as sent
+    const sentEmbed = new EmbedBuilder()
+      .setColor(0x2b2d31) // neutral/dim grey
+      .setTitle('Message Sent ✓')
+      .addFields(
+        { name: 'Message', value: msg.message.length > 100 ? msg.message.slice(0, 100) + '...' : msg.message },
+        { name: 'Channel', value: `<#${msg.channel_id}>` },
+        { name: 'Sent at', value: `<t:${msg.send_at}:F>` },
+      );
+
+    await client.rest.patch(
+      `/webhooks/${client.user.id}/${msg.interaction_token}/messages/@original`,
+      { body: { embeds: [sentEmbed.toJSON()], components: [] } },
+    );
+  } catch (_) {
+    // Token expired (>15 min) — buttons will be cleaned up when clicked instead
+  }
+}
+
 // ─── Scheduler: checks every 15 seconds for due messages ────────────────────
 async function checkScheduledMessages() {
   const dueMessages = db.getDueMessages();
@@ -522,6 +569,8 @@ async function checkScheduledMessages() {
     }
 
     if (sent) {
+      // Try to update the confirmation embed to remove buttons and mark as sent
+      await cleanUpConfirmationEmbed(msg);
       db.deleteMessage(msg.id);
     } else {
       // Notify the user their message failed, then delete so we don't retry forever
