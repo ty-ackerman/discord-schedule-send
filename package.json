@@ -1,0 +1,24 @@
+{
+  "name": "discord-schedule-send",
+  "version": "1.0.0",
+  "description": "A Discord bot that lets you schedule messages to be sent at a specific date and time.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "schedule",
+    "message"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "chrono-node": "^2.9.0",
+    "dayjs": "^1.11.19",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.4"
+  }
+}

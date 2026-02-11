@@ -1,0 +1,151 @@
+# Discord Schedule Send Bot
+
+A Discord bot that lets you type something like `/schedule message: Happy birthday! time: tomorrow at 9am` and the bot will send that message at the right time — even if you're offline.
+
+## What it does
+
+- **`/schedule`** — Schedule a message to be sent later. You type the message, pick a time in plain English, and optionally choose a channel.
+- **`/schedule-list`** — See all your upcoming scheduled messages.
+- **`/schedule-cancel`** — Cancel a scheduled message by its ID.
+
+The bot checks every 15 seconds for messages that are due and sends them automatically.
+
+## Quick start (run it on your computer)
+
+### 1. Set up your Discord bot
+
+If you haven't already:
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a new Application.
+2. Go to the **Bot** tab, click **Reset Token**, and copy the token.
+3. Go to **OAuth2 > URL Generator**:
+   - Check `bot` and `applications.commands` under Scopes
+   - Check `Send Messages` under Bot Permissions
+   - Copy the generated URL and paste it into your browser to invite the bot to your server
+4. You'll need three values for the next step:
+   - **Bot Token** — from step 2
+   - **Application ID** — on the General Information page
+   - **Guild ID** — right-click your server name in Discord (with Developer Mode on) and click Copy Server ID
+
+### 2. Create your `.env` file
+
+Create a file called `.env` in the project root:
+
+```
+DISCORD_TOKEN=your-bot-token
+CLIENT_ID=your-application-id
+GUILD_ID=your-server-id
+```
+
+### 3. Install dependencies
+
+```bash
+npm install
+```
+
+### 4. Register the slash commands
+
+You only need to do this once (or whenever you change the commands):
+
+```bash
+npm run deploy
+```
+
+### 5. Start the bot
+
+```bash
+npm start
+```
+
+You should see `Bot is online as YourBot#1234` in the terminal. Go to your Discord server and try `/schedule`!
+
+## Time examples
+
+The bot understands natural language for times. Here are some things you can type:
+
+| You type | It understands |
+|---|---|
+| `in 30 minutes` | 30 minutes from now |
+| `tomorrow at 3pm` | Tomorrow at 3:00 PM |
+| `friday at noon` | Next Friday at 12:00 PM |
+| `march 5 at 10:30am` | March 5th at 10:30 AM |
+| `in 2 hours` | 2 hours from now |
+| `next monday at 9am` | Next Monday at 9:00 AM |
+
+## Deploy to Railway (keep it running 24/7)
+
+Railway is a cloud platform that will run your bot for free (or very cheap). Here's how:
+
+### 1. Push your code to GitHub
+
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+```
+
+Then create a repo on [github.com](https://github.com) and push to it:
+
+```bash
+git remote add origin https://github.com/YOUR_USERNAME/discord-schedule-send.git
+git branch -M main
+git push -u origin main
+```
+
+### 2. Deploy on Railway
+
+1. Go to [railway.app](https://railway.app) and sign in with GitHub.
+2. Click **New Project** > **Deploy from GitHub repo**.
+3. Select your `discord-schedule-send` repository.
+4. Railway will detect it's a Node.js app automatically.
+
+### 3. Add your environment variables
+
+In your Railway project dashboard:
+
+1. Click on your service (the one it just created).
+2. Go to the **Variables** tab.
+3. Add these three variables:
+   - `DISCORD_TOKEN` = your bot token
+   - `CLIENT_ID` = your application ID
+   - `GUILD_ID` = your server ID
+
+### 4. Register commands (one time)
+
+In Railway, go to the **Settings** tab of your service and find the **Custom Start Command** field. Temporarily set it to:
+
+```
+node src/deploy-commands.js && node src/index.js
+```
+
+After the first deploy succeeds and you see "Done! Slash commands registered" in the logs, you can change it back to just:
+
+```
+node src/index.js
+```
+
+Or leave it — it's harmless to re-register commands on each start.
+
+### That's it!
+
+Your bot is now running 24/7. Railway will automatically redeploy whenever you push to GitHub.
+
+## Project structure
+
+```
+├── .env                  # Your secrets (not committed to git)
+├── .gitignore
+├── package.json
+├── Procfile              # Tells Railway this is a worker (not a web server)
+├── README.md
+└── src/
+    ├── index.js          # Main bot — handles commands and the scheduler loop
+    ├── deploy-commands.js # Registers slash commands with Discord (run once)
+    └── database.js       # SQLite database for storing scheduled messages
+```
+
+## Good to know
+
+- **Messages are only visible to you** when you use the commands — the bot replies with "ephemeral" messages that only you can see. The scheduled message itself is sent publicly.
+- **SQLite on Railway**: Railway's filesystem resets on each deploy. This means any pending scheduled messages will be lost when you redeploy. For casual use this is fine. If you need persistence, you could switch to Railway's PostgreSQL add-on (but that's a bigger change).
+- **15-second check interval**: The bot checks for due messages every 15 seconds, so your message might be sent up to 15 seconds after the scheduled time.
