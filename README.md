@@ -20,7 +20,7 @@ If you haven't already:
 2. Go to the **Bot** tab, click **Reset Token**, and copy the token.
 3. Go to **OAuth2 > URL Generator**:
    - Check `bot` and `applications.commands` under Scopes
-   - Check `Send Messages` under Bot Permissions
+   - Check `Send Messages` and `Manage Webhooks` under Bot Permissions
    - Copy the generated URL and paste it into your browser to invite the bot to your server
 4. You'll need three values for the next step:
    - **Bot Token** — from step 2
@@ -159,6 +159,8 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 
 ## Good to know
 
+- **Messages look like they came from you.** When a scheduled message is sent, it shows your display name and avatar — not the bot's. Under the hood, the bot uses a Discord webhook to achieve this. The only subtle difference from a normal message is a small "BOT" tag next to your name (this is a Discord limitation for any webhook-sent message, and there's no way around it).
 - **Messages are only visible to you** when you use the commands — the bot replies with "ephemeral" messages that only you can see. The scheduled message itself is sent publicly.
+- **The bot needs Manage Webhooks permission.** This is what allows it to send messages that display your name and avatar. If the bot doesn't have this permission in a channel, the scheduled message will fail to send.
 - **SQLite on Railway**: Railway's filesystem resets on each deploy. This means any pending scheduled messages will be lost when you redeploy. For casual use this is fine. If you need persistence, you could switch to Railway's PostgreSQL add-on (but that's a bigger change).
 - **15-second check interval**: The bot checks for due messages every 15 seconds, so your message might be sent up to 15 seconds after the scheduled time.

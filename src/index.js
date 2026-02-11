@@ -88,6 +88,10 @@ async function handleSchedule(interaction) {
     });
   }
 
+  // Capture user identity so the scheduled message looks like it came from them
+  const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
+  const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
+
   // Save to database
   const id = db.addScheduledMessage({
     guildId: interaction.guildId,
@@ -95,6 +99,8 @@ async function handleSchedule(interaction) {
     userId: interaction.user.id,
     message: messageText,
     sendAt: parsedDate,
+    userDisplayName,
+    userAvatarUrl,
   });
 
   const formattedTime = dayjs(parsedDate).format('dddd, MMMM D, YYYY [at] h:mm A');
@@ -160,6 +166,26 @@ async function handleScheduleCancel(interaction) {
   }
 }
 
+// ─── Webhook helper: get or create a webhook the bot can reuse ───────────────
+const WEBHOOK_NAME = 'Schedule Send';
+
+async function getOrCreateWebhook(channel) {
+  // Fetch existing webhooks on this channel
+  const webhooks = await channel.fetchWebhooks();
+
+  // Reuse one we already created (match by name and owner)
+  const existing = webhooks.find(
+    (wh) => wh.name === WEBHOOK_NAME && wh.owner?.id === client.user.id
+  );
+  if (existing) return existing;
+
+  // Create a new one
+  return channel.createWebhook({
+    name: WEBHOOK_NAME,
+    reason: 'Used by Schedule Send bot to deliver messages as the original author',
+  });
+}
+
 // ─── Scheduler: checks every 15 seconds for due messages ────────────────────
 async function checkScheduledMessages() {
   const dueMessages = db.getDueMessages();
@@ -167,12 +193,21 @@ async function checkScheduledMessages() {
   for (const msg of dueMessages) {
     try {
       const channel = await client.channels.fetch(msg.channel_id);
-      if (channel) {
-        await channel.send(msg.message);
-        console.log(`Sent scheduled message #${msg.id} to #${channel.name}`);
-      } else {
+      if (!channel) {
         console.warn(`Channel ${msg.channel_id} not found, skipping message #${msg.id}`);
+        db.deleteMessage(msg.id);
+        continue;
       }
+
+      // Use a webhook so the message appears with the user's name and avatar
+      const webhook = await getOrCreateWebhook(channel);
+      await webhook.send({
+        content: msg.message,
+        username: msg.user_display_name || 'Scheduled Message',
+        avatarURL: msg.user_avatar_url || undefined,
+      });
+
+      console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}"`);
     } catch (error) {
       console.error(`Failed to send message #${msg.id}:`, error.message);
     }

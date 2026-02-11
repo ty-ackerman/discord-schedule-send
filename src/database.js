@@ -12,20 +12,30 @@ db.exec(`
     user_id TEXT NOT NULL,
     message TEXT NOT NULL,
     send_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    user_display_name TEXT,
+    user_avatar_url TEXT
   )
 `);
+
+// Migrate: add columns if they don't exist (for existing databases)
+try {
+  db.exec(`ALTER TABLE scheduled_messages ADD COLUMN user_display_name TEXT`);
+} catch (_) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE scheduled_messages ADD COLUMN user_avatar_url TEXT`);
+} catch (_) { /* column already exists */ }
 
 /**
  * Save a new scheduled message to the database.
  * @returns The inserted row's id.
  */
-function addScheduledMessage({ guildId, channelId, userId, message, sendAt }) {
+function addScheduledMessage({ guildId, channelId, userId, message, sendAt, userDisplayName, userAvatarUrl }) {
   const stmt = db.prepare(`
-    INSERT INTO scheduled_messages (guild_id, channel_id, user_id, message, send_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO scheduled_messages (guild_id, channel_id, user_id, message, send_at, user_display_name, user_avatar_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(guildId, channelId, userId, message, Math.floor(sendAt.getTime() / 1000));
+  const result = stmt.run(guildId, channelId, userId, message, Math.floor(sendAt.getTime() / 1000), userDisplayName, userAvatarUrl);
   return result.lastInsertRowid;
 }
 
