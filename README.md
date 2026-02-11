@@ -126,6 +126,19 @@ node src/index.js
 
 Or leave it — it's harmless to re-register commands on each start.
 
+### 5. Keep it alive with UptimeRobot (free)
+
+Railway may put your service to sleep after a period of inactivity. To prevent that, set up a free monitoring service that pings your bot every few minutes:
+
+1. Go to [UptimeRobot](https://uptimerobot.com) and create a free account.
+2. Click **Add New Monitor**.
+3. Set **Monitor Type** to **HTTP(s)**.
+4. For the **URL**, paste your Railway service's public URL — you can find this in your Railway dashboard under your service's **Settings > Networking > Public Networking**. It'll look something like `https://discord-schedule-send-production.up.railway.app`.
+5. Set the **Monitoring Interval** to 5 minutes (the free tier minimum).
+6. Click **Create Monitor**.
+
+That's it — UptimeRobot will ping your bot every 5 minutes, which keeps Railway from putting it to sleep.
+
 ### That's it!
 
 Your bot is now running 24/7. Railway will automatically redeploy whenever you push to GitHub.
@@ -136,7 +149,7 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 ├── .env                  # Your secrets (not committed to git)
 ├── .gitignore
 ├── package.json
-├── Procfile              # Tells Railway this is a worker (not a web server)
+├── Procfile              # Tells Railway this is a web service (exposes a health check endpoint)
 ├── README.md
 └── src/
     ├── index.js          # Main bot — handles commands and the scheduler loop

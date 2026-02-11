@@ -2,10 +2,20 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const chrono = require('chrono-node');
 const dayjs = require('dayjs');
 const relativeTime = require('dayjs/plugin/relativeTime');
+const http = require('http');
 const db = require('./database');
 require('dotenv').config();
 
 dayjs.extend(relativeTime);
+
+// ─── Health check server (keeps Railway from sleeping) ───────────────────────
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK');
+}).listen(PORT, () => {
+  console.log(`Health check server listening on port ${PORT}`);
+});
 
 // ─── Create the Discord client ───────────────────────────────────────────────
 const client = new Client({
