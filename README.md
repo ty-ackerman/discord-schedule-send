@@ -109,11 +109,12 @@ In your Railway project dashboard:
 
 1. Click on your service (the one it just created).
 2. Go to the **Variables** tab.
-3. Add these four variables:
+3. Add these variables:
    - `DISCORD_TOKEN` = your bot token
    - `CLIENT_ID` = your application ID
    - `GUILD_ID` = your server ID
    - `DEFAULT_TIMEZONE` = your team's timezone (e.g. `America/New_York`)
+   - `DATABASE_PATH` = `/data` (see step 6 for persistent storage)
 
 ### 4. Register commands (one time)
 
@@ -144,6 +145,18 @@ Railway may put your service to sleep after a period of inactivity. To prevent t
 
 That's it — UptimeRobot will ping your bot every 5 minutes, which keeps Railway from putting it to sleep.
 
+### 6. Add persistent storage (so scheduled messages survive redeploys)
+
+Without this step, the database resets every time you deploy. To keep your data:
+
+1. In your Railway service, go to the **Volumes** tab (or **Settings > Volumes**).
+2. Click **Add Volume**.
+3. Set the **Mount Path** to `/data`.
+4. Click **Create**.
+5. Make sure you added `DATABASE_PATH=/data` in your environment variables (step 3).
+
+That's it — the SQLite database now lives on persistent storage. Your scheduled messages and timezone preferences will survive redeploys.
+
 ### That's it!
 
 Your bot is now running 24/7. Railway will automatically redeploy whenever you push to GitHub.
@@ -169,6 +182,6 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 - **Edit or cancel from anywhere.** After scheduling a message, the confirmation includes **Edit** and **Cancel** buttons. These same buttons also appear on every message in `/schedule-list`, so you can manage everything from one place. Click **Edit** to change the message text or reschedule the time — a pop-up form appears with your message pre-filled. Click **Cancel** to remove it, and the list refreshes automatically. Discord allows up to 5 button rows per message, so if you have more than 5 scheduled messages, the rest can be managed with `/schedule-cancel`.
 - **Messages are only visible to you** when you use the commands — the bot replies with "ephemeral" messages that only you can see. The scheduled message itself is sent publicly.
 - **The bot needs Manage Webhooks permission.** This is what allows it to send messages that display your name and avatar. If the bot doesn't have this permission in a channel, it will fall back to sending as the bot. If that also fails, you'll get a DM explaining what went wrong.
-- **SQLite on Railway**: Railway's filesystem resets on each deploy. This means any pending scheduled messages and timezone preferences will be lost when you redeploy. For casual use this is fine. If you need persistence, you could switch to Railway's PostgreSQL add-on (but that's a bigger change).
+- **Persistent storage**: The bot uses SQLite, which stores data in a single file. On Railway, add a Volume mounted at `/data` and set `DATABASE_PATH=/data` so the database persists across redeploys. Without a volume, Railway's filesystem resets on each deploy and you lose pending messages.
 - **15-second check interval**: The bot checks for due messages every 15 seconds, so your message might be sent up to 15 seconds after the scheduled time.
 - **Connection resilience**: If the Discord gateway disconnects (e.g. network blip, another client using the same token), the bot will attempt to reconnect automatically. If disconnected for more than 2 minutes, the process exits so Railway can restart it fresh. The health check endpoint also reports the actual Discord connection status, not just whether Node.js is running.
