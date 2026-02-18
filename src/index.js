@@ -15,28 +15,97 @@ const http = require('http');
 const db = require('./database');
 require('dotenv').config();
 
+// ─── Pending drafts (in-memory, pre-save) ────────────────────────────────────
+const pendingDrafts = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, draft] of pendingDrafts) {
+    if (now - draft.createdAt > 15 * 60 * 1000) {
+      if (draft.collector) draft.collector.stop('expired');
+      pendingDrafts.delete(id);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// ─── Track Discord connection state ──────────────────────────────────────────
+let discordReady = false;
+let disconnectedSince = null;
+
 // ─── Health check server (keeps Railway from sleeping) ───────────────────────
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK');
+  const status = discordReady ? 200 : 503;
+  res.writeHead(status, { 'Content-Type': 'text/plain' });
+  res.end(discordReady ? 'OK' : 'Discord disconnected');
 }).listen(PORT, () => {
   console.log(`Health check server listening on port ${PORT}`);
 });
 
 // ─── Create the Discord client ───────────────────────────────────────────────
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
 // ─── Bot ready ───────────────────────────────────────────────────────────────
-client.once('ready', () => {
-  console.log(`Bot is online as ${client.user.tag}`);
-  console.log(`Checking for scheduled messages every 15 seconds...`);
+let schedulerStarted = false;
 
-  // Start the scheduler loop
-  setInterval(checkScheduledMessages, 15_000);
+client.on('ready', () => {
+  discordReady = true;
+  disconnectedSince = null;
+  console.log(`Bot is online as ${client.user.tag}`);
+
+  if (!schedulerStarted) {
+    schedulerStarted = true;
+    console.log(`Checking for scheduled messages every 15 seconds...`);
+    setInterval(checkScheduledMessages, 15_000);
+  }
 });
+
+client.on('shardDisconnect', (event) => {
+  discordReady = false;
+  disconnectedSince = disconnectedSince || Date.now();
+  console.warn(`Discord shard disconnected (code ${event.code}). Will attempt reconnect...`);
+});
+
+client.on('shardReconnecting', () => {
+  console.log('Discord shard reconnecting...');
+});
+
+client.on('shardResume', () => {
+  discordReady = true;
+  disconnectedSince = null;
+  console.log('Discord shard resumed.');
+});
+
+client.on('shardError', (error) => {
+  console.error('Discord shard error:', error.message);
+});
+
+// If disconnected for >2 minutes, exit so Railway restarts the process
+setInterval(() => {
+  if (disconnectedSince && Date.now() - disconnectedSince > 2 * 60 * 1000) {
+    console.error('Discord disconnected for >2 minutes. Exiting for restart...');
+    process.exit(1);
+  }
+}, 30_000);
+
+// ─── Default timezone (from .env) ────────────────────────────────────────────
+const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'UTC';
+
+/**
+ * Convert an IANA timezone name (e.g. "America/New_York") to a numeric UTC
+ * offset in minutes that chrono-node reliably understands.
+ *
+ * chrono-node accepts IANA strings in theory, but on UTC-based servers (like
+ * Railway) it can silently fall back to UTC.  A numeric offset always works.
+ */
+function getTimezoneOffsetMinutes(timezoneName) {
+  const now = new Date();
+  const utcDate = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+  const tzDate  = new Date(now.toLocaleString('en-US', { timeZone: timezoneName }));
+  return Math.round((tzDate - utcDate) / 60000);
+}
 
 // ─── Handle slash commands ───────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
@@ -73,7 +142,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ─── Handle button interactions (Cancel / Edit) ─────────────────────────────
+// ─── Handle button & modal interactions ──────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton()) {
     try {
@@ -92,7 +161,6 @@ client.on('interactionCreate', async (interaction) => {
 
           await interaction.update({ embeds: [embed], components: [] });
         } else {
-          // Message already sent or cancelled — clean up the stale buttons
           const embed = new EmbedBuilder()
             .setColor(0x2b2d31)
             .setTitle('Message Sent ✓')
@@ -109,7 +177,6 @@ client.on('interactionCreate', async (interaction) => {
         const deleted = db.cancelMessage(messageId, interaction.user.id);
 
         if (deleted) {
-          // Refresh the list with the cancelled message removed
           const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
           const response = buildScheduleListResponse(remaining);
 
@@ -127,7 +194,6 @@ client.on('interactionCreate', async (interaction) => {
             });
           }
         } else {
-          // Already sent or cancelled — just refresh the list
           const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
           const response = buildScheduleListResponse(remaining);
           await interaction.update({
@@ -144,7 +210,6 @@ client.on('interactionCreate', async (interaction) => {
         const msg = db.getMessageById(messageId);
 
         if (!msg || msg.user_id !== interaction.user.id) {
-          // Message gone — refresh the list
           const remaining = db.getUserMessages(interaction.guildId, interaction.user.id);
           const response = buildScheduleListResponse(remaining);
           await interaction.update({
@@ -187,7 +252,6 @@ client.on('interactionCreate', async (interaction) => {
         const msg = db.getMessageById(messageId);
 
         if (!msg || msg.user_id !== interaction.user.id) {
-          // Message already sent or cancelled — clean up the stale buttons
           const embed = new EmbedBuilder()
             .setColor(0x2b2d31)
             .setTitle('Message Sent ✓')
@@ -223,6 +287,244 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.showModal(modal);
         return;
       }
+
+      // ── Draft: Add Image ──────────────────────────────────────────────
+      if (customId.startsWith('draft_image_')) {
+        const draftId = customId.replace('draft_image_', '');
+        const draft = pendingDrafts.get(draftId);
+
+        if (!draft || draft.userId !== interaction.user.id) {
+          await interaction.update({
+            content: 'This draft has expired. Use `/schedule` to start a new one.',
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+
+        if (draft.collector) {
+          draft.collector.stop('new_upload');
+          draft.collector = null;
+        }
+
+        const uploadEmbed = new EmbedBuilder()
+          .setColor(0xfee75c)
+          .setTitle('📎 Upload an Image')
+          .setDescription(
+            'Send an image in this channel within 60 seconds.\n\n' +
+            "I'll grab it and delete your message to keep things clean."
+          );
+
+        const cancelUploadRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`draft_cancel_upload_${draftId}`)
+            .setLabel('Cancel Upload')
+            .setStyle(ButtonStyle.Secondary),
+        );
+
+        await interaction.update({ embeds: [uploadEmbed], components: [cancelUploadRow] });
+
+        const collector = interaction.channel.createMessageCollector({
+          filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
+          max: 1,
+          time: 60_000,
+        });
+
+        draft.collector = collector;
+
+        collector.on('collect', async (message) => {
+          const attachment = message.attachments.first();
+          draft.imageUrl = attachment.url;
+          draft.imageFilename = attachment.name;
+          draft.collector = null;
+
+          try { await message.delete(); } catch (_) {}
+
+          const { embed, buttons } = buildDraftPreview(draftId, draft);
+          try {
+            await interaction.editReply({
+              content: draft.permWarning || undefined,
+              embeds: [embed],
+              components: [buttons],
+            });
+          } catch (err) {
+            console.error('Failed to update draft after image upload:', err);
+          }
+        });
+
+        collector.on('end', async (collected, reason) => {
+          draft.collector = null;
+          if (reason === 'time' && collected.size === 0) {
+            const { embed, buttons } = buildDraftPreview(draftId, draft);
+            embed.setFooter({ text: 'Image upload timed out. You can try again or submit.' });
+            try {
+              await interaction.editReply({
+                content: draft.permWarning || undefined,
+                embeds: [embed],
+                components: [buttons],
+              });
+            } catch (_) {}
+          }
+        });
+
+        return;
+      }
+
+      // ── Draft: Cancel Upload ──────────────────────────────────────────
+      if (customId.startsWith('draft_cancel_upload_')) {
+        const draftId = customId.replace('draft_cancel_upload_', '');
+        const draft = pendingDrafts.get(draftId);
+
+        if (!draft || draft.userId !== interaction.user.id) {
+          await interaction.update({
+            content: 'This draft has expired. Use `/schedule` to start a new one.',
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+
+        if (draft.collector) {
+          draft.collector.stop('cancelled');
+          draft.collector = null;
+        }
+
+        const { embed, buttons } = buildDraftPreview(draftId, draft);
+        await interaction.update({
+          content: draft.permWarning || undefined,
+          embeds: [embed],
+          components: [buttons],
+        });
+        return;
+      }
+
+      // ── Draft: Remove Image ───────────────────────────────────────────
+      if (customId.startsWith('draft_remove_image_')) {
+        const draftId = customId.replace('draft_remove_image_', '');
+        const draft = pendingDrafts.get(draftId);
+
+        if (!draft || draft.userId !== interaction.user.id) {
+          await interaction.update({
+            content: 'This draft has expired. Use `/schedule` to start a new one.',
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+
+        draft.imageUrl = null;
+        draft.imageFilename = null;
+
+        const { embed, buttons } = buildDraftPreview(draftId, draft);
+        await interaction.update({
+          content: draft.permWarning || undefined,
+          embeds: [embed],
+          components: [buttons],
+        });
+        return;
+      }
+
+      // ── Draft: Cancel (check AFTER draft_cancel_upload_ to avoid prefix collision)
+      if (customId.startsWith('draft_cancel_') && !customId.startsWith('draft_cancel_upload_')) {
+        const draftId = customId.replace('draft_cancel_', '');
+        const draft = pendingDrafts.get(draftId);
+
+        if (draft?.collector) {
+          draft.collector.stop('cancelled');
+        }
+        pendingDrafts.delete(draftId);
+
+        const embed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('Draft Discarded')
+          .setDescription('Your scheduled message draft has been cancelled.');
+
+        await interaction.update({ embeds: [embed], components: [] });
+        return;
+      }
+
+      // ── Draft: Submit ─────────────────────────────────────────────────
+      if (customId.startsWith('draft_submit_')) {
+        const draftId = customId.replace('draft_submit_', '');
+        const draft = pendingDrafts.get(draftId);
+
+        if (!draft || draft.userId !== interaction.user.id) {
+          await interaction.update({
+            content: 'This draft has expired. Use `/schedule` to start a new one.',
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+
+        if (draft.collector) {
+          draft.collector.stop('submitted');
+          draft.collector = null;
+        }
+
+        if (draft.sendAt <= new Date()) {
+          pendingDrafts.delete(draftId);
+          await interaction.update({
+            content: 'The scheduled time has already passed. Please create a new schedule.',
+            embeds: [],
+            components: [],
+          });
+          return;
+        }
+
+        const id = db.addScheduledMessage({
+          guildId: draft.guildId,
+          channelId: draft.channelId,
+          userId: draft.userId,
+          message: draft.message,
+          sendAt: draft.sendAt,
+          userDisplayName: draft.userDisplayName,
+          userAvatarUrl: draft.userAvatarUrl,
+          interactionToken: interaction.token,
+          imageUrl: draft.imageUrl,
+        });
+
+        pendingDrafts.delete(draftId);
+
+        const unixTimestamp = Math.floor(draft.sendAt.getTime() / 1000);
+
+        const embed = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle('Message Scheduled')
+          .addFields(
+            { name: 'Message', value: draft.message.length > 1024 ? draft.message.slice(0, 1021) + '...' : draft.message },
+            { name: 'Channel', value: `<#${draft.channelId}>` },
+            { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
+            { name: 'ID', value: `${id}`, inline: true },
+          )
+          .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
+
+        if (draft.imageUrl) {
+          embed.addFields({ name: 'Image', value: `✅ ${draft.imageFilename || 'attached'}` });
+          embed.setThumbnail(draft.imageUrl);
+        }
+
+        const confirmButtons = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`edit_schedule_${id}`)
+            .setLabel('Edit')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('✏️'),
+          new ButtonBuilder()
+            .setCustomId(`cancel_schedule_${id}`)
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('🗑️'),
+        );
+
+        await interaction.update({
+          content: draft.permWarning || undefined,
+          embeds: [embed],
+          components: [confirmButtons],
+        });
+        return;
+      }
+
     } catch (error) {
       console.error('Error handling button interaction:', error);
     }
@@ -235,11 +537,9 @@ client.on('interactionCreate', async (interaction) => {
       const messageText = interaction.fields.getTextInputValue('schedule_message');
       const timeInput = interaction.fields.getTextInputValue('schedule_time').trim();
 
-      // Use the user's personal timezone if set, otherwise fall back to the server default
       const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
       const timezoneOffset = getTimezoneOffsetMinutes(timezone);
 
-      // Parse the natural language time in the resolved timezone
       const parsedDate = chrono.parseDate(timeInput, { instant: new Date(), timezone: timezoneOffset }, { forwardDate: true });
 
       if (!parsedDate) {
@@ -261,19 +561,17 @@ client.on('interactionCreate', async (interaction) => {
 
       const channel = await client.channels.fetch(channelId);
 
-      // Warn if missing Manage Webhooks permission
       let permWarning = '';
       const botPermissions = channel.permissionsFor(interaction.guild.members.me);
       if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
         permWarning = `\n\n⚠️ I don't have **Manage Webhooks** permission in <#${channelId}>, so the message will be sent as the bot instead of appearing as you.`;
       }
 
-      // Capture user identity
       const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
       const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
 
-      // Save to database (include interaction token so we can clean up buttons after send)
-      const id = db.addScheduledMessage({
+      const draftId = `${Date.now()}_${interaction.user.id}`;
+      pendingDrafts.set(draftId, {
         guildId: interaction.guildId,
         channelId,
         userId: interaction.user.id,
@@ -281,34 +579,14 @@ client.on('interactionCreate', async (interaction) => {
         sendAt: parsedDate,
         userDisplayName,
         userAvatarUrl,
-        interactionToken: interaction.token,
+        imageUrl: null,
+        imageFilename: null,
+        permWarning,
+        createdAt: Date.now(),
+        collector: null,
       });
 
-      const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
-
-      const embed = new EmbedBuilder()
-        .setColor(0x57f287)
-        .setTitle('Message Scheduled')
-        .addFields(
-          { name: 'Message', value: messageText },
-          { name: 'Channel', value: `<#${channelId}>` },
-          { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
-          { name: 'ID', value: `${id}`, inline: true },
-        )
-        .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
-
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`edit_schedule_${id}`)
-          .setLabel('Edit')
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji('✏️'),
-        new ButtonBuilder()
-          .setCustomId(`cancel_schedule_${id}`)
-          .setLabel('Cancel')
-          .setStyle(ButtonStyle.Danger)
-          .setEmoji('🗑️'),
-      );
+      const { embed, buttons } = buildDraftPreview(draftId, pendingDrafts.get(draftId));
 
       await interaction.reply({
         content: permWarning || undefined,
@@ -345,8 +623,7 @@ client.on('interactionCreate', async (interaction) => {
       const newMessage = interaction.fields.getTextInputValue('edited_message');
       const newTimeInput = interaction.fields.getTextInputValue('edited_time').trim();
 
-      // Determine the new send time
-      let newSendAt = msg.send_at; // default: keep existing time
+      let newSendAt = msg.send_at;
 
       if (newTimeInput) {
         const timezone = db.getUserTimezone(interaction.user.id) || DEFAULT_TIMEZONE;
@@ -390,7 +667,12 @@ client.on('interactionCreate', async (interaction) => {
           )
           .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
 
-        const buttons = new ActionRowBuilder().addComponents(
+        if (msg.image_url) {
+          embed.addFields({ name: 'Image', value: '✅ attached' });
+          embed.setThumbnail(msg.image_url);
+        }
+
+        const editButtons = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`edit_schedule_${messageId}`)
             .setLabel('Edit')
@@ -403,7 +685,7 @@ client.on('interactionCreate', async (interaction) => {
             .setEmoji('🗑️'),
         );
 
-        await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+        await interaction.reply({ embeds: [embed], components: [editButtons], ephemeral: true });
       } else {
         await interaction.reply({
           content: `Could not update message **#${messageId}**. It may have already been sent or cancelled.`,
@@ -422,29 +704,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ─── Default timezone (from .env) ────────────────────────────────────────────
-const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || 'UTC';
-
-/**
- * Convert an IANA timezone name (e.g. "America/New_York") to a numeric UTC
- * offset in minutes that chrono-node reliably understands.
- *
- * chrono-node accepts IANA strings in theory, but on UTC-based servers (like
- * Railway) it can silently fall back to UTC.  A numeric offset always works.
- */
-function getTimezoneOffsetMinutes(timezoneName) {
-  const now = new Date();
-  const utcDate = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const tzDate  = new Date(now.toLocaleString('en-US', { timeZone: timezoneName }));
-  return Math.round((tzDate - utcDate) / 60000);
-}
-
 // ─── /schedule-timezone ──────────────────────────────────────────────────────
 async function handleScheduleTimezone(interaction) {
   const timezone = interaction.options.getString('timezone');
   db.setUserTimezone(interaction.user.id, timezone);
 
-  // Show the current time in their chosen timezone as confirmation
   const now = Math.floor(Date.now() / 1000);
 
   await interaction.reply({
@@ -493,6 +757,61 @@ async function handleSchedule(interaction) {
   await interaction.showModal(modal);
 }
 
+// ─── Draft preview builder ───────────────────────────────────────────────────
+function buildDraftPreview(draftId, draft) {
+  const unixTimestamp = Math.floor(draft.sendAt.getTime() / 1000);
+
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('📝 Draft — Review & Schedule')
+    .addFields(
+      { name: 'Message', value: draft.message.length > 1024 ? draft.message.slice(0, 1021) + '...' : draft.message },
+      { name: 'Channel', value: `<#${draft.channelId}>` },
+      { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
+    );
+
+  if (draft.imageUrl) {
+    embed.addFields({ name: 'Image', value: `✅ ${draft.imageFilename || 'attached'}` });
+    embed.setThumbnail(draft.imageUrl);
+  }
+
+  embed.setFooter({ text: draft.imageUrl ? 'Review and submit to schedule' : 'Optionally add an image, or submit to schedule' });
+
+  const buttonRow = new ActionRowBuilder();
+
+  if (draft.imageUrl) {
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`draft_remove_image_${draftId}`)
+        .setLabel('Remove Image')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('🗑️'),
+    );
+  } else {
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`draft_image_${draftId}`)
+        .setLabel('Add Image')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('📎'),
+    );
+  }
+
+  buttonRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`draft_cancel_${draftId}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`draft_submit_${draftId}`)
+      .setLabel('Schedule')
+      .setStyle(ButtonStyle.Success)
+      .setEmoji('✅'),
+  );
+
+  return { embed, buttons: buttonRow };
+}
+
 // ─── Schedule list helper (shared by /schedule-list and list button handlers) ─
 function buildScheduleListResponse(messages) {
   if (messages.length === 0) {
@@ -506,7 +825,8 @@ function buildScheduleListResponse(messages) {
 
   const lines = messages.map((msg) => {
     const preview = msg.message.length > 50 ? msg.message.slice(0, 50) + '...' : msg.message;
-    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
+    const imageTag = msg.image_url ? ' 📎' : '';
+    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)${imageTag}\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
   });
 
   const embed = new EmbedBuilder()
@@ -514,7 +834,6 @@ function buildScheduleListResponse(messages) {
     .setTitle('Your Scheduled Messages')
     .setDescription(lines.join('\n\n'));
 
-  // Add Edit / Cancel buttons for each message (max 5 due to Discord's ActionRow limit)
   const components = messages.slice(0, 5).map((msg) =>
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -565,16 +884,13 @@ async function handleScheduleCancel(interaction) {
 const WEBHOOK_NAME = 'Schedule Send';
 
 async function getOrCreateWebhook(channel) {
-  // Fetch existing webhooks on this channel
   const webhooks = await channel.fetchWebhooks();
 
-  // Reuse one we already created (match by name and owner)
   const existing = webhooks.find(
     (wh) => wh.name === WEBHOOK_NAME && wh.owner?.id === client.user.id
   );
   if (existing) return existing;
 
-  // Create a new one
   return channel.createWebhook({
     name: WEBHOOK_NAME,
     reason: 'Used by Schedule Send bot to deliver messages as the original author',
@@ -609,9 +925,8 @@ async function cleanUpConfirmationEmbed(msg) {
   if (!msg.interaction_token) return;
 
   try {
-    // Edit the original interaction response to remove buttons and mark as sent
     const sentEmbed = new EmbedBuilder()
-      .setColor(0x2b2d31) // neutral/dim grey
+      .setColor(0x2b2d31)
       .setTitle('Message Sent ✓')
       .addFields(
         { name: 'Message', value: msg.message.length > 100 ? msg.message.slice(0, 100) + '...' : msg.message },
@@ -647,20 +962,31 @@ async function checkScheduledMessages() {
       // Try sending via webhook first (shows user's name and avatar)
       try {
         const webhook = await getOrCreateWebhook(channel);
-        await webhook.send({
+        const sendOptions = {
           content: msg.message,
           username: msg.user_display_name || 'Scheduled Message',
           avatarURL: msg.user_avatar_url || undefined,
-        });
+        };
+
+        if (msg.image_url) {
+          sendOptions.files = [{ attachment: msg.image_url, name: 'image.png' }];
+        }
+
+        await webhook.send(sendOptions);
         sent = true;
         console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}" (via webhook)`);
       } catch (webhookError) {
         console.warn(`Webhook failed for message #${msg.id}: ${webhookError.message}. Falling back to channel.send()...`);
 
-        // Fallback: send as the bot (better than not sending at all)
         try {
           const fallbackLabel = msg.user_display_name ? ` (scheduled by ${msg.user_display_name})` : '';
-          await channel.send(`${msg.message}${fallbackLabel}`);
+          const fallbackOptions = { content: `${msg.message}${fallbackLabel}` };
+
+          if (msg.image_url) {
+            fallbackOptions.files = [{ attachment: msg.image_url, name: 'image.png' }];
+          }
+
+          await channel.send(fallbackOptions);
           sent = true;
           console.log(`Sent scheduled message #${msg.id} to #${channel.name} via fallback (channel.send)`);
         } catch (sendError) {
@@ -674,11 +1000,9 @@ async function checkScheduledMessages() {
     }
 
     if (sent) {
-      // Try to update the confirmation embed to remove buttons and mark as sent
       await cleanUpConfirmationEmbed(msg);
       db.deleteMessage(msg.id);
     } else {
-      // Notify the user their message failed, then delete so we don't retry forever
       await notifyUserOfFailure(msg.user_id, msg, 'The bot could not send the message. Please check that it has Send Messages and Manage Webhooks permissions in the channel.');
       db.deleteMessage(msg.id);
     }

@@ -4,8 +4,8 @@ A Discord bot that lets you type something like `/schedule message: Happy birthd
 
 ## What it does
 
-- **`/schedule`** — Schedule a message to be sent later. You type the message, pick a time in plain English, and optionally choose a channel.
-- **`/schedule-list`** — See all your upcoming scheduled messages, with **Edit** and **Cancel** buttons right on each one.
+- **`/schedule`** — Schedule a message to be sent later. You type the message, pick a time in plain English, and optionally choose a channel. After filling in the form, you'll see a draft preview with three buttons: **Add Image** (attach a photo), **Cancel**, or **Schedule**.
+- **`/schedule-list`** — See all your upcoming scheduled messages, with **Edit** and **Cancel** buttons right on each one. Messages with images show a 📎 indicator.
 - **`/schedule-cancel`** — Cancel a scheduled message by its ID (also available as a button on `/schedule-list`).
 - **`/schedule-timezone`** *(optional)* — Override the server's default timezone with your own. Most people won't need this — it's only for someone in a different timezone than the rest of the team.
 
@@ -166,8 +166,10 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 
 - **Timezone handling.** The bot uses the `DEFAULT_TIMEZONE` from your `.env` for all users. If someone on your team is in a different timezone, they can run `/schedule-timezone` to override it for themselves — but most people won't need to.
 - **Messages look like they came from you.** When a scheduled message is sent, it shows your display name and avatar — not the bot's. Under the hood, the bot uses a Discord webhook to achieve this. The only subtle difference from a normal message is a small "BOT" tag next to your name (this is a Discord limitation for any webhook-sent message, and there's no way around it).
+- **Image attachments.** After filling in the schedule form, you'll see a draft preview. Click **Add Image** to attach a photo — the bot will prompt you to upload one in the channel, then grab it and delete your upload to keep things clean. You can remove or replace the image before submitting. When the message is sent, the image is included automatically.
 - **Edit or cancel from anywhere.** After scheduling a message, the confirmation includes **Edit** and **Cancel** buttons. These same buttons also appear on every message in `/schedule-list`, so you can manage everything from one place. Click **Edit** to change the message text or reschedule the time — a pop-up form appears with your message pre-filled. Click **Cancel** to remove it, and the list refreshes automatically. Discord allows up to 5 button rows per message, so if you have more than 5 scheduled messages, the rest can be managed with `/schedule-cancel`.
 - **Messages are only visible to you** when you use the commands — the bot replies with "ephemeral" messages that only you can see. The scheduled message itself is sent publicly.
 - **The bot needs Manage Webhooks permission.** This is what allows it to send messages that display your name and avatar. If the bot doesn't have this permission in a channel, it will fall back to sending as the bot. If that also fails, you'll get a DM explaining what went wrong.
 - **SQLite on Railway**: Railway's filesystem resets on each deploy. This means any pending scheduled messages and timezone preferences will be lost when you redeploy. For casual use this is fine. If you need persistence, you could switch to Railway's PostgreSQL add-on (but that's a bigger change).
 - **15-second check interval**: The bot checks for due messages every 15 seconds, so your message might be sent up to 15 seconds after the scheduled time.
+- **Connection resilience**: If the Discord gateway disconnects (e.g. network blip, another client using the same token), the bot will attempt to reconnect automatically. If disconnected for more than 2 minutes, the process exits so Railway can restart it fresh. The health check endpoint also reports the actual Discord connection status, not just whether Node.js is running.
