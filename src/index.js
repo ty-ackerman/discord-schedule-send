@@ -15,19 +15,6 @@ const http = require('http');
 const db = require('./database');
 require('dotenv').config();
 
-// ─── Pending drafts (in-memory, pre-save) ────────────────────────────────────
-const pendingDrafts = new Map();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, draft] of pendingDrafts) {
-    if (now - draft.createdAt > 15 * 60 * 1000) {
-      if (draft.collector) draft.collector.stop('expired');
-      pendingDrafts.delete(id);
-    }
-  }
-}, 5 * 60 * 1000);
-
 // ─── Track Discord connection state ──────────────────────────────────────────
 let discordReady = false;
 let disconnectedSince = null;
@@ -44,7 +31,7 @@ http.createServer((req, res) => {
 
 // ─── Create the Discord client ───────────────────────────────────────────────
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds],
 });
 
 // ─── Bot ready ───────────────────────────────────────────────────────────────
@@ -287,244 +274,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.showModal(modal);
         return;
       }
-
-      // ── Draft: Add Image ──────────────────────────────────────────────
-      if (customId.startsWith('draft_image_')) {
-        const draftId = customId.replace('draft_image_', '');
-        const draft = pendingDrafts.get(draftId);
-
-        if (!draft || draft.userId !== interaction.user.id) {
-          await interaction.update({
-            content: 'This draft has expired. Use `/schedule` to start a new one.',
-            embeds: [],
-            components: [],
-          });
-          return;
-        }
-
-        if (draft.collector) {
-          draft.collector.stop('new_upload');
-          draft.collector = null;
-        }
-
-        const uploadEmbed = new EmbedBuilder()
-          .setColor(0xfee75c)
-          .setTitle('📎 Upload an Image')
-          .setDescription(
-            'Send an image in this channel within 60 seconds.\n\n' +
-            "I'll grab it and delete your message to keep things clean."
-          );
-
-        const cancelUploadRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`draft_cancel_upload_${draftId}`)
-            .setLabel('Cancel Upload')
-            .setStyle(ButtonStyle.Secondary),
-        );
-
-        await interaction.update({ embeds: [uploadEmbed], components: [cancelUploadRow] });
-
-        const collector = interaction.channel.createMessageCollector({
-          filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
-          max: 1,
-          time: 60_000,
-        });
-
-        draft.collector = collector;
-
-        collector.on('collect', async (message) => {
-          const attachment = message.attachments.first();
-          draft.imageUrl = attachment.url;
-          draft.imageFilename = attachment.name;
-          draft.collector = null;
-
-          try { await message.delete(); } catch (_) {}
-
-          const { embed, buttons } = buildDraftPreview(draftId, draft);
-          try {
-            await interaction.editReply({
-              content: draft.permWarning || undefined,
-              embeds: [embed],
-              components: [buttons],
-            });
-          } catch (err) {
-            console.error('Failed to update draft after image upload:', err);
-          }
-        });
-
-        collector.on('end', async (collected, reason) => {
-          draft.collector = null;
-          if (reason === 'time' && collected.size === 0) {
-            const { embed, buttons } = buildDraftPreview(draftId, draft);
-            embed.setFooter({ text: 'Image upload timed out. You can try again or submit.' });
-            try {
-              await interaction.editReply({
-                content: draft.permWarning || undefined,
-                embeds: [embed],
-                components: [buttons],
-              });
-            } catch (_) {}
-          }
-        });
-
-        return;
-      }
-
-      // ── Draft: Cancel Upload ──────────────────────────────────────────
-      if (customId.startsWith('draft_cancel_upload_')) {
-        const draftId = customId.replace('draft_cancel_upload_', '');
-        const draft = pendingDrafts.get(draftId);
-
-        if (!draft || draft.userId !== interaction.user.id) {
-          await interaction.update({
-            content: 'This draft has expired. Use `/schedule` to start a new one.',
-            embeds: [],
-            components: [],
-          });
-          return;
-        }
-
-        if (draft.collector) {
-          draft.collector.stop('cancelled');
-          draft.collector = null;
-        }
-
-        const { embed, buttons } = buildDraftPreview(draftId, draft);
-        await interaction.update({
-          content: draft.permWarning || undefined,
-          embeds: [embed],
-          components: [buttons],
-        });
-        return;
-      }
-
-      // ── Draft: Remove Image ───────────────────────────────────────────
-      if (customId.startsWith('draft_remove_image_')) {
-        const draftId = customId.replace('draft_remove_image_', '');
-        const draft = pendingDrafts.get(draftId);
-
-        if (!draft || draft.userId !== interaction.user.id) {
-          await interaction.update({
-            content: 'This draft has expired. Use `/schedule` to start a new one.',
-            embeds: [],
-            components: [],
-          });
-          return;
-        }
-
-        draft.imageUrl = null;
-        draft.imageFilename = null;
-
-        const { embed, buttons } = buildDraftPreview(draftId, draft);
-        await interaction.update({
-          content: draft.permWarning || undefined,
-          embeds: [embed],
-          components: [buttons],
-        });
-        return;
-      }
-
-      // ── Draft: Cancel (check AFTER draft_cancel_upload_ to avoid prefix collision)
-      if (customId.startsWith('draft_cancel_') && !customId.startsWith('draft_cancel_upload_')) {
-        const draftId = customId.replace('draft_cancel_', '');
-        const draft = pendingDrafts.get(draftId);
-
-        if (draft?.collector) {
-          draft.collector.stop('cancelled');
-        }
-        pendingDrafts.delete(draftId);
-
-        const embed = new EmbedBuilder()
-          .setColor(0xed4245)
-          .setTitle('Draft Discarded')
-          .setDescription('Your scheduled message draft has been cancelled.');
-
-        await interaction.update({ embeds: [embed], components: [] });
-        return;
-      }
-
-      // ── Draft: Submit ─────────────────────────────────────────────────
-      if (customId.startsWith('draft_submit_')) {
-        const draftId = customId.replace('draft_submit_', '');
-        const draft = pendingDrafts.get(draftId);
-
-        if (!draft || draft.userId !== interaction.user.id) {
-          await interaction.update({
-            content: 'This draft has expired. Use `/schedule` to start a new one.',
-            embeds: [],
-            components: [],
-          });
-          return;
-        }
-
-        if (draft.collector) {
-          draft.collector.stop('submitted');
-          draft.collector = null;
-        }
-
-        if (draft.sendAt <= new Date()) {
-          pendingDrafts.delete(draftId);
-          await interaction.update({
-            content: 'The scheduled time has already passed. Please create a new schedule.',
-            embeds: [],
-            components: [],
-          });
-          return;
-        }
-
-        const id = db.addScheduledMessage({
-          guildId: draft.guildId,
-          channelId: draft.channelId,
-          userId: draft.userId,
-          message: draft.message,
-          sendAt: draft.sendAt,
-          userDisplayName: draft.userDisplayName,
-          userAvatarUrl: draft.userAvatarUrl,
-          interactionToken: interaction.token,
-          imageUrl: draft.imageUrl,
-        });
-
-        pendingDrafts.delete(draftId);
-
-        const unixTimestamp = Math.floor(draft.sendAt.getTime() / 1000);
-
-        const embed = new EmbedBuilder()
-          .setColor(0x57f287)
-          .setTitle('Message Scheduled')
-          .addFields(
-            { name: 'Message', value: draft.message.length > 1024 ? draft.message.slice(0, 1021) + '...' : draft.message },
-            { name: 'Channel', value: `<#${draft.channelId}>` },
-            { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
-            { name: 'ID', value: `${id}`, inline: true },
-          )
-          .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
-
-        if (draft.imageUrl) {
-          embed.addFields({ name: 'Image', value: `✅ ${draft.imageFilename || 'attached'}` });
-          embed.setThumbnail(draft.imageUrl);
-        }
-
-        const confirmButtons = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`edit_schedule_${id}`)
-            .setLabel('Edit')
-            .setStyle(ButtonStyle.Primary)
-            .setEmoji('✏️'),
-          new ButtonBuilder()
-            .setCustomId(`cancel_schedule_${id}`)
-            .setLabel('Cancel')
-            .setStyle(ButtonStyle.Danger)
-            .setEmoji('🗑️'),
-        );
-
-        await interaction.update({
-          content: draft.permWarning || undefined,
-          embeds: [embed],
-          components: [confirmButtons],
-        });
-        return;
-      }
-
     } catch (error) {
       console.error('Error handling button interaction:', error);
     }
@@ -570,8 +319,7 @@ client.on('interactionCreate', async (interaction) => {
       const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
       const userAvatarUrl = interaction.user.displayAvatarURL({ size: 256 });
 
-      const draftId = `${Date.now()}_${interaction.user.id}`;
-      pendingDrafts.set(draftId, {
+      const id = db.addScheduledMessage({
         guildId: interaction.guildId,
         channelId,
         userId: interaction.user.id,
@@ -579,14 +327,34 @@ client.on('interactionCreate', async (interaction) => {
         sendAt: parsedDate,
         userDisplayName,
         userAvatarUrl,
-        imageUrl: null,
-        imageFilename: null,
-        permWarning,
-        createdAt: Date.now(),
-        collector: null,
+        interactionToken: interaction.token,
       });
 
-      const { embed, buttons } = buildDraftPreview(draftId, pendingDrafts.get(draftId));
+      const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle('Message Scheduled')
+        .addFields(
+          { name: 'Message', value: messageText },
+          { name: 'Channel', value: `<#${channelId}>` },
+          { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
+          { name: 'ID', value: `${id}`, inline: true },
+        )
+        .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`edit_schedule_${id}`)
+          .setLabel('Edit')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('✏️'),
+        new ButtonBuilder()
+          .setCustomId(`cancel_schedule_${id}`)
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Danger)
+          .setEmoji('🗑️'),
+      );
 
       await interaction.reply({
         content: permWarning || undefined,
@@ -666,11 +434,6 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'ID', value: `${messageId}`, inline: true },
           )
           .setFooter({ text: 'Use /schedule-list to see all your scheduled messages' });
-
-        if (msg.image_url) {
-          embed.addFields({ name: 'Image', value: '✅ attached' });
-          embed.setThumbnail(msg.image_url);
-        }
 
         const editButtons = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
@@ -757,61 +520,6 @@ async function handleSchedule(interaction) {
   await interaction.showModal(modal);
 }
 
-// ─── Draft preview builder ───────────────────────────────────────────────────
-function buildDraftPreview(draftId, draft) {
-  const unixTimestamp = Math.floor(draft.sendAt.getTime() / 1000);
-
-  const embed = new EmbedBuilder()
-    .setColor(0xfee75c)
-    .setTitle('📝 Draft — Review & Schedule')
-    .addFields(
-      { name: 'Message', value: draft.message.length > 1024 ? draft.message.slice(0, 1021) + '...' : draft.message },
-      { name: 'Channel', value: `<#${draft.channelId}>` },
-      { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
-    );
-
-  if (draft.imageUrl) {
-    embed.addFields({ name: 'Image', value: `✅ ${draft.imageFilename || 'attached'}` });
-    embed.setThumbnail(draft.imageUrl);
-  }
-
-  embed.setFooter({ text: draft.imageUrl ? 'Review and submit to schedule' : 'Optionally add an image, or submit to schedule' });
-
-  const buttonRow = new ActionRowBuilder();
-
-  if (draft.imageUrl) {
-    buttonRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId(`draft_remove_image_${draftId}`)
-        .setLabel('Remove Image')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('🗑️'),
-    );
-  } else {
-    buttonRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId(`draft_image_${draftId}`)
-        .setLabel('Add Image')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('📎'),
-    );
-  }
-
-  buttonRow.addComponents(
-    new ButtonBuilder()
-      .setCustomId(`draft_cancel_${draftId}`)
-      .setLabel('Cancel')
-      .setStyle(ButtonStyle.Danger),
-    new ButtonBuilder()
-      .setCustomId(`draft_submit_${draftId}`)
-      .setLabel('Schedule')
-      .setStyle(ButtonStyle.Success)
-      .setEmoji('✅'),
-  );
-
-  return { embed, buttons: buttonRow };
-}
-
 // ─── Schedule list helper (shared by /schedule-list and list button handlers) ─
 function buildScheduleListResponse(messages) {
   if (messages.length === 0) {
@@ -825,8 +533,7 @@ function buildScheduleListResponse(messages) {
 
   const lines = messages.map((msg) => {
     const preview = msg.message.length > 50 ? msg.message.slice(0, 50) + '...' : msg.message;
-    const imageTag = msg.image_url ? ' 📎' : '';
-    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)${imageTag}\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
+    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
   });
 
   const embed = new EmbedBuilder()
@@ -962,17 +669,11 @@ async function checkScheduledMessages() {
       // Try sending via webhook first (shows user's name and avatar)
       try {
         const webhook = await getOrCreateWebhook(channel);
-        const sendOptions = {
+        await webhook.send({
           content: msg.message,
           username: msg.user_display_name || 'Scheduled Message',
           avatarURL: msg.user_avatar_url || undefined,
-        };
-
-        if (msg.image_url) {
-          sendOptions.files = [{ attachment: msg.image_url, name: 'image.png' }];
-        }
-
-        await webhook.send(sendOptions);
+        });
         sent = true;
         console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}" (via webhook)`);
       } catch (webhookError) {
@@ -980,13 +681,7 @@ async function checkScheduledMessages() {
 
         try {
           const fallbackLabel = msg.user_display_name ? ` (scheduled by ${msg.user_display_name})` : '';
-          const fallbackOptions = { content: `${msg.message}${fallbackLabel}` };
-
-          if (msg.image_url) {
-            fallbackOptions.files = [{ attachment: msg.image_url, name: 'image.png' }];
-          }
-
-          await channel.send(fallbackOptions);
+          await channel.send(`${msg.message}${fallbackLabel}`);
           sent = true;
           console.log(`Sent scheduled message #${msg.id} to #${channel.name} via fallback (channel.send)`);
         } catch (sendError) {
