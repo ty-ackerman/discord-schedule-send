@@ -704,5 +704,23 @@ async function checkScheduledMessages() {
   }
 }
 
-// ─── Log in ──────────────────────────────────────────────────────────────────
-client.login(process.env.DISCORD_TOKEN);
+// ─── Log in (with retry on transient failures) ──────────────────────────────
+async function loginWithRetry(retries = 10, delay = 5_000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await client.login(process.env.DISCORD_TOKEN);
+      return;
+    } catch (error) {
+      console.error(`Login attempt ${attempt}/${retries} failed: ${error.message}`);
+      if (attempt === retries) {
+        console.error('All login attempts exhausted. Exiting...');
+        process.exit(1);
+      }
+      const wait = delay * attempt;
+      console.log(`Retrying in ${wait / 1000}s...`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
+loginWithRetry();
