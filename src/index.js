@@ -315,12 +315,16 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const channel = await client.channels.fetch(channelId);
-
+      let channel;
       let permWarning = '';
-      const botPermissions = channel.permissionsFor(interaction.guild.members.me);
-      if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
-        permWarning = `\n\n⚠️ I don't have **Manage Webhooks** permission in <#${channelId}>, so the message will be sent as the bot instead of appearing as you.`;
+      try {
+        channel = await client.channels.fetch(channelId);
+        const botPermissions = channel.permissionsFor(interaction.guild.members.me);
+        if (botPermissions && !botPermissions.has(PermissionsBitField.Flags.ManageWebhooks)) {
+          permWarning = `\n\n⚠️ I don't have **Manage Webhooks** permission in <#${channelId}>, so the message will be sent as the bot instead of appearing as you.`;
+        }
+      } catch (_) {
+        permWarning = `\n\n⚠️ I can't access <#${channelId}> right now. The message is saved, but make sure the bot has **View Channels**, **Send Messages**, and **Manage Webhooks** permissions in that channel before the scheduled time.`;
       }
 
       const userDisplayName = interaction.member?.displayName || interaction.user.displayName || interaction.user.username;
@@ -681,12 +685,18 @@ async function cleanUpConfirmationEmbed(msg) {
   }
 }
 
+// Max time (in seconds) to keep retrying a failed message before giving up
+const MAX_RETRY_WINDOW = 2 * 60 * 60; // 2 hours
+
 // ─── Scheduler: checks every 15 seconds for due messages ────────────────────
 async function checkScheduledMessages() {
+  if (!discordReady) return;
+
   const dueMessages = db.getDueMessages();
 
   for (const msg of dueMessages) {
     let sent = false;
+    const overdueSec = Math.floor(Date.now() / 1000) - msg.send_at;
 
     try {
       const channel = await client.channels.fetch(msg.channel_id);
@@ -707,7 +717,6 @@ async function checkScheduledMessages() {
         }
       }
 
-      // Try sending via webhook first (shows user's name and avatar)
       try {
         const webhook = await getOrCreateWebhook(channel);
         const webhookPayload = {
@@ -735,16 +744,17 @@ async function checkScheduledMessages() {
       }
     } catch (error) {
       console.error(`Failed to send message #${msg.id}:`, error.message);
-      await notifyUserOfFailure(msg.user_id, msg, 'An unexpected error occurred while sending the message.');
-      db.deleteMessage(msg.id);
     }
 
     if (sent) {
       await cleanUpConfirmationEmbed(msg);
       db.deleteMessage(msg.id);
-    } else {
-      await notifyUserOfFailure(msg.user_id, msg, 'The bot could not send the message. Please check that it has Send Messages and Manage Webhooks permissions in the channel.');
+    } else if (overdueSec > MAX_RETRY_WINDOW) {
+      console.error(`Message #${msg.id} has failed for ${Math.round(overdueSec / 60)} minutes — giving up.`);
+      await notifyUserOfFailure(msg.user_id, msg, `The bot tried to send this message for over ${Math.round(MAX_RETRY_WINDOW / 3600)} hours but kept failing. Please check that the bot has View Channels, Send Messages, and Manage Webhooks permissions in the channel.`);
       db.deleteMessage(msg.id);
+    } else {
+      console.warn(`Message #${msg.id} failed to send (${Math.round(overdueSec / 60)}min overdue) — will retry.`);
     }
   }
 }
