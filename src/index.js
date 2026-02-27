@@ -502,7 +502,15 @@ async function handleScheduleTimezone(interaction) {
 // ─── /schedule — show modal ──────────────────────────────────────────────────
 async function handleSchedule(interaction) {
   const explicitChannel = interaction.options.getChannel('channel');
-  const channel = explicitChannel || interaction.channel;
+  const channel = explicitChannel || interaction.channel || await interaction.client.channels.fetch(interaction.channelId);
+
+  if (!channel) {
+    await interaction.reply({
+      content: 'Could not determine which channel to use. Try specifying one with the `channel` option.',
+      ephemeral: true,
+    });
+    return;
+  }
 
   let targetChannelId = channel.id;
   let threadId = null;
