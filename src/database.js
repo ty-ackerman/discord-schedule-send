@@ -37,6 +37,9 @@ try {
 try {
   db.exec(`ALTER TABLE scheduled_messages ADD COLUMN image_url TEXT`);
 } catch (_) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE scheduled_messages ADD COLUMN thread_id TEXT`);
+} catch (_) { /* column already exists */ }
 
 // User timezone preferences
 db.exec(`
@@ -50,13 +53,13 @@ db.exec(`
  * Save a new scheduled message to the database.
  * @returns The inserted row's id.
  */
-function addScheduledMessage({ guildId, channelId, userId, message, sendAt, userDisplayName, userAvatarUrl, interactionToken, imageUrl }) {
+function addScheduledMessage({ guildId, channelId, userId, message, sendAt, userDisplayName, userAvatarUrl, interactionToken, imageUrl, threadId }) {
   const stmt = db.prepare(`
-    INSERT INTO scheduled_messages (guild_id, channel_id, user_id, message, send_at, user_display_name, user_avatar_url, interaction_token, image_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_messages (guild_id, channel_id, user_id, message, send_at, user_display_name, user_avatar_url, interaction_token, image_url, thread_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const sendAtUnix = typeof sendAt === 'number' ? sendAt : Math.floor(sendAt.getTime() / 1000);
-  const result = stmt.run(guildId, channelId, userId, message, sendAtUnix, userDisplayName, userAvatarUrl, interactionToken || null, imageUrl || null);
+  const result = stmt.run(guildId, channelId, userId, message, sendAtUnix, userDisplayName, userAvatarUrl, interactionToken || null, imageUrl || null, threadId || null);
   return result.lastInsertRowid;
 }
 

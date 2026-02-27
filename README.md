@@ -4,7 +4,7 @@ A Discord bot that lets you type something like `/schedule message: Happy birthd
 
 ## What it does
 
-- **`/schedule`** — Schedule a message to be sent later. You type the message, pick a time in plain English, and optionally choose a channel.
+- **`/schedule`** — Schedule a message to be sent later. You type the message, pick a time in plain English, and optionally choose a channel. Works in threads too — just run it inside a thread and the message will be delivered there.
 - **`/schedule-list`** — See all your upcoming scheduled messages, with **Edit** and **Cancel** buttons right on each one.
 - **`/schedule-cancel`** — Cancel a scheduled message by its ID (also available as a button on `/schedule-list`).
 - **`/schedule-timezone`** *(optional)* — Override the server's default timezone with your own. Most people won't need this — it's only for someone in a different timezone than the rest of the team.

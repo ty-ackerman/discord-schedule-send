@@ -282,7 +282,14 @@ client.on('interactionCreate', async (interaction) => {
   // ── Modal submit (schedule) ────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId.startsWith('schedule_modal_')) {
     try {
-      const channelId = interaction.customId.replace('schedule_modal_', '');
+      const idPayload = interaction.customId.replace('schedule_modal_', '');
+      let channelId, threadId;
+      if (idPayload.includes('_thread_')) {
+        [channelId, threadId] = idPayload.split('_thread_');
+      } else {
+        channelId = idPayload;
+        threadId = null;
+      }
       const messageText = interaction.fields.getTextInputValue('schedule_message');
       const timeInput = interaction.fields.getTextInputValue('schedule_time').trim();
 
@@ -328,16 +335,18 @@ client.on('interactionCreate', async (interaction) => {
         userDisplayName,
         userAvatarUrl,
         interactionToken: interaction.token,
+        threadId,
       });
 
       const unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
+      const destinationLabel = threadId ? `<#${threadId}> (thread)` : `<#${channelId}>`;
 
       const embed = new EmbedBuilder()
         .setColor(0x57f287)
         .setTitle('Message Scheduled')
         .addFields(
           { name: 'Message', value: messageText },
-          { name: 'Channel', value: `<#${channelId}>` },
+          { name: 'Channel', value: destinationLabel },
           { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
           { name: 'ID', value: `${id}`, inline: true },
         )
@@ -429,7 +438,7 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('Message Updated')
           .addFields(
             { name: 'Message', value: newMessage },
-            { name: 'Channel', value: `<#${msg.channel_id}>` },
+            { name: 'Channel', value: msg.thread_id ? `<#${msg.thread_id}> (thread)` : `<#${msg.channel_id}>` },
             { name: 'Sends at', value: `<t:${newSendAt}:F> (<t:${newSendAt}:R>)` },
             { name: 'ID', value: `${messageId}`, inline: true },
           )
@@ -492,10 +501,23 @@ async function handleScheduleTimezone(interaction) {
 
 // ─── /schedule — show modal ──────────────────────────────────────────────────
 async function handleSchedule(interaction) {
-  const channel = interaction.options.getChannel('channel') || interaction.channel;
+  const explicitChannel = interaction.options.getChannel('channel');
+  const channel = explicitChannel || interaction.channel;
+
+  let targetChannelId = channel.id;
+  let threadId = null;
+
+  if (!explicitChannel && channel.isThread()) {
+    targetChannelId = channel.parentId;
+    threadId = channel.id;
+  }
+
+  const customId = threadId
+    ? `schedule_modal_${targetChannelId}_thread_${threadId}`
+    : `schedule_modal_${targetChannelId}`;
 
   const modal = new ModalBuilder()
-    .setCustomId(`schedule_modal_${channel.id}`)
+    .setCustomId(customId)
     .setTitle('Schedule a Message');
 
   const messageInput = new TextInputBuilder()
@@ -533,7 +555,8 @@ function buildScheduleListResponse(messages) {
 
   const lines = messages.map((msg) => {
     const preview = msg.message.length > 50 ? msg.message.slice(0, 50) + '...' : msg.message;
-    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)\n> ${preview}\n> Channel: <#${msg.channel_id}>`;
+    const channelRef = msg.thread_id ? `<#${msg.thread_id}> (thread)` : `<#${msg.channel_id}>`;
+    return `**#${msg.id}** — <t:${msg.send_at}:f> (<t:${msg.send_at}:R>)\n> ${preview}\n> Channel: ${channelRef}`;
   });
 
   const embed = new EmbedBuilder()
@@ -615,7 +638,7 @@ async function notifyUserOfFailure(userId, msg, errorMessage) {
           .setColor(0xed4245)
           .setTitle('Scheduled Message Failed to Send')
           .setDescription(
-            `Your scheduled message could not be delivered to <#${msg.channel_id}>.\n\n` +
+            `Your scheduled message could not be delivered to <#${msg.thread_id || msg.channel_id}>.\n\n` +
             `**Error:** ${errorMessage}\n\n` +
             `**Your message was:**\n> ${preview}`
           )
@@ -637,7 +660,7 @@ async function cleanUpConfirmationEmbed(msg) {
       .setTitle('Message Sent ✓')
       .addFields(
         { name: 'Message', value: msg.message.length > 100 ? msg.message.slice(0, 100) + '...' : msg.message },
-        { name: 'Channel', value: `<#${msg.channel_id}>` },
+        { name: 'Channel', value: msg.thread_id ? `<#${msg.thread_id}> (thread)` : `<#${msg.channel_id}>` },
         { name: 'Sent at', value: `<t:${msg.send_at}:F>` },
       );
 
@@ -666,24 +689,38 @@ async function checkScheduledMessages() {
         continue;
       }
 
+      const threadId = msg.thread_id || null;
+      let threadChannel = null;
+      if (threadId) {
+        try {
+          threadChannel = await client.channels.fetch(threadId);
+        } catch (_) {
+          console.warn(`Thread ${threadId} not found for message #${msg.id}, sending to parent channel instead`);
+        }
+      }
+
       // Try sending via webhook first (shows user's name and avatar)
       try {
         const webhook = await getOrCreateWebhook(channel);
-        await webhook.send({
+        const webhookPayload = {
           content: msg.message,
           username: msg.user_display_name || 'Scheduled Message',
           avatarURL: msg.user_avatar_url || undefined,
-        });
+        };
+        if (threadId) webhookPayload.threadId = threadId;
+        await webhook.send(webhookPayload);
         sent = true;
-        console.log(`Sent scheduled message #${msg.id} to #${channel.name} as "${msg.user_display_name}" (via webhook)`);
+        const dest = threadChannel ? `thread #${threadChannel.name}` : `#${channel.name}`;
+        console.log(`Sent scheduled message #${msg.id} to ${dest} as "${msg.user_display_name}" (via webhook)`);
       } catch (webhookError) {
         console.warn(`Webhook failed for message #${msg.id}: ${webhookError.message}. Falling back to channel.send()...`);
 
         try {
           const fallbackLabel = msg.user_display_name ? ` (scheduled by ${msg.user_display_name})` : '';
-          await channel.send(`${msg.message}${fallbackLabel}`);
+          const sendTarget = threadChannel || channel;
+          await sendTarget.send(`${msg.message}${fallbackLabel}`);
           sent = true;
-          console.log(`Sent scheduled message #${msg.id} to #${channel.name} via fallback (channel.send)`);
+          console.log(`Sent scheduled message #${msg.id} to #${sendTarget.name} via fallback (channel.send)`);
         } catch (sendError) {
           console.error(`Fallback also failed for message #${msg.id}:`, sendError.message);
         }
