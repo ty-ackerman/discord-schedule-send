@@ -37,9 +37,12 @@ DISCORD_TOKEN=your-bot-token
 CLIENT_ID=your-application-id
 GUILD_ID=your-server-id
 DEFAULT_TIMEZONE=America/New_York
+NTFY_TOPIC=your-unique-topic-name
 ```
 
 The `DEFAULT_TIMEZONE` is the timezone used for all users by default. Set this to wherever most of your team is located. Common values: `America/New_York` (Eastern), `America/Chicago` (Central), `America/Denver` (Mountain), `America/Los_Angeles` (Pacific). Full list: [IANA timezone names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+
+The `NTFY_TOPIC` is optional but recommended — it enables push notifications to your phone when something goes wrong (see the **Alerts** section below).
 
 ### 3. Install dependencies
 
@@ -115,6 +118,7 @@ In your Railway project dashboard:
    - `GUILD_ID` = your server ID
    - `DEFAULT_TIMEZONE` = your team's timezone (e.g. `America/New_York`)
    - `DATABASE_PATH` = `/data` (see step 6 for persistent storage)
+   - `NTFY_TOPIC` = a unique topic name for alerts (optional, see **Alerts** section)
 
 ### 4. Register commands (one time)
 
@@ -172,8 +176,36 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 └── src/
     ├── index.js          # Main bot — handles commands and the scheduler loop
     ├── deploy-commands.js # Registers slash commands with Discord (run once)
-    └── database.js       # SQLite database for storing scheduled messages
+    ├── database.js       # SQLite database for storing scheduled messages
+    └── notify.js         # Push notifications via ntfy (optional)
 ```
+
+## Alerts (push notifications via ntfy)
+
+The bot can send push notifications to your phone when things go wrong, so you don't have to check Railway logs to find out a message was lost.
+
+### What triggers an alert
+
+| Event | Priority | When |
+|---|---|---|
+| Bot started successfully | Normal | Every time the bot comes online |
+| Message delivery failing | High | At 1, 5, and 30 minutes overdue (not every retry) |
+| Scheduled message lost | Urgent | Message hit the 2-hour retry limit and was dropped |
+| Discord disconnected >2min | High | Bot is about to restart due to prolonged disconnect |
+| REST health check failing | Urgent | Bot can't make API calls — about to restart |
+| Login failed | Urgent | All 10 login attempts exhausted |
+| Token missing at startup | Urgent | `DISCORD_TOKEN` env var is not set |
+
+### Setup
+
+1. Install the [ntfy app](https://ntfy.sh) on your phone (available on iOS and Android).
+2. Open the app and subscribe to a topic — pick something unique and hard to guess, like `discord-bot-alerts-a7x9`. This is your `NTFY_TOPIC`.
+3. Add `NTFY_TOPIC=discord-bot-alerts-a7x9` to your `.env` (local) or Railway environment variables.
+4. Restart the bot. You should get a "Bot started" notification on your phone.
+
+That's it. If you skip this step, the bot works exactly the same — you just won't get phone alerts.
+
+If you're self-hosting ntfy, set `NTFY_SERVER` to your server URL (defaults to `https://ntfy.sh`).
 
 ## Good to know
 
@@ -185,3 +217,5 @@ Your bot is now running 24/7. Railway will automatically redeploy whenever you p
 - **Persistent storage**: The bot uses SQLite, which stores data in a single file. On Railway, add a Volume mounted at `/data` and set `DATABASE_PATH=/data` so the database persists across redeploys. Without a volume, Railway's filesystem resets on each deploy and you lose pending messages.
 - **15-second check interval**: The bot checks for due messages every 15 seconds, so your message might be sent up to 15 seconds after the scheduled time.
 - **Connection resilience**: If the Discord gateway disconnects (e.g. network blip, another client using the same token), the bot will attempt to reconnect automatically. If disconnected for more than 2 minutes, the process exits so Railway can restart it fresh. The health check endpoint also reports the actual Discord connection status, not just whether Node.js is running.
+- **REST health check**: Every 5 minutes, the bot verifies it can still make API calls to Discord. If this fails 3 times in a row, the bot restarts itself. This catches the scenario where the WebSocket connection is alive but the bot's auth token has silently become invalid — previously this would cause messages to fail for up to 2 hours before being dropped.
+- **Startup validation**: On boot, the bot verifies the `DISCORD_TOKEN` env var is set, confirms `client.token` is valid after login, and makes a test API call. If any of these fail, the bot exits immediately instead of running in a broken state.

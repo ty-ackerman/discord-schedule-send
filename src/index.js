@@ -13,6 +13,7 @@ const {
 const chrono = require('chrono-node');
 const http = require('http');
 const db = require('./database');
+const notify = require('./notify');
 require('dotenv').config();
 
 // ─── Track Discord connection state ──────────────────────────────────────────
@@ -72,7 +73,9 @@ client.on('shardError', (error) => {
 // If disconnected for >2 minutes, exit so Railway restarts the process
 setInterval(() => {
   if (disconnectedSince && Date.now() - disconnectedSince > 2 * 60 * 1000) {
-    console.error('Discord disconnected for >2 minutes. Exiting for restart...');
+    const msg = 'Discord disconnected for >2 minutes. Exiting for restart...';
+    console.error(msg);
+    notify.send('Bot disconnected — restarting', msg, { priority: 'high', tags: ['warning'] });
     process.exit(1);
   }
 }, 30_000);
@@ -750,11 +753,17 @@ async function checkScheduledMessages() {
       await cleanUpConfirmationEmbed(msg);
       db.deleteMessage(msg.id);
     } else if (overdueSec > MAX_RETRY_WINDOW) {
-      console.error(`Message #${msg.id} has failed for ${Math.round(overdueSec / 60)} minutes — giving up.`);
+      const detail = `Message #${msg.id} has failed for ${Math.round(overdueSec / 60)} minutes — giving up.`;
+      console.error(detail);
+      notify.send('Scheduled message lost', `${detail}\nUser: ${msg.user_display_name || msg.user_id}\nPreview: ${msg.message.slice(0, 100)}`, { priority: 'urgent', tags: ['x'] });
       await notifyUserOfFailure(msg.user_id, msg, `The bot tried to send this message for over ${Math.round(MAX_RETRY_WINDOW / 3600)} hours but kept failing. Please check that the bot has View Channels, Send Messages, and Manage Webhooks permissions in the channel.`);
       db.deleteMessage(msg.id);
     } else {
-      console.warn(`Message #${msg.id} failed to send (${Math.round(overdueSec / 60)}min overdue) — will retry.`);
+      const overdueMin = Math.round(overdueSec / 60);
+      console.warn(`Message #${msg.id} failed to send (${overdueMin}min overdue) — will retry.`);
+      if (overdueMin === 1 || overdueMin === 5 || overdueMin === 30) {
+        notify.send('Message delivery failing', `Message #${msg.id} is ${overdueMin}min overdue and still failing.\nUser: ${msg.user_display_name || msg.user_id}`, { priority: 'high', tags: ['warning'] });
+      }
     }
   }
 }
@@ -768,7 +777,9 @@ async function loginWithRetry(retries = 10, delay = 5_000) {
     } catch (error) {
       console.error(`Login attempt ${attempt}/${retries} failed: ${error.message}`);
       if (attempt === retries) {
-        console.error('All login attempts exhausted. Exiting...');
+        const msg = 'All login attempts exhausted. Exiting...';
+        console.error(msg);
+        notify.send('Bot login failed', msg, { priority: 'urgent', tags: ['rotating_light'] });
         process.exit(1);
       }
       const wait = delay * attempt;
@@ -778,4 +789,54 @@ async function loginWithRetry(retries = 10, delay = 5_000) {
   }
 }
 
-loginWithRetry();
+async function startBot() {
+  if (!process.env.DISCORD_TOKEN) {
+    const msg = 'DISCORD_TOKEN environment variable is missing. Exiting.';
+    console.error(msg);
+    notify.send('Bot startup failed', msg, { priority: 'urgent', tags: ['rotating_light'] });
+    process.exit(1);
+  }
+
+  await loginWithRetry();
+
+  if (!client.token) {
+    const msg = 'client.token is null after login — Discord REST calls will fail. Exiting for restart.';
+    console.error(msg);
+    notify.send('Bot token invalid after login', msg, { priority: 'urgent', tags: ['rotating_light'] });
+    process.exit(1);
+  }
+
+  try {
+    const me = await client.user.fetch();
+    console.log(`REST health check passed — logged in as ${me.tag}`);
+  } catch (err) {
+    const msg = `REST health check failed after login: ${err.message}. Exiting for restart.`;
+    console.error(msg);
+    notify.send('Bot REST check failed at startup', msg, { priority: 'urgent', tags: ['rotating_light'] });
+    process.exit(1);
+  }
+
+  notify.send('Bot started', `Online as ${client.user.tag}`, { tags: ['white_check_mark', 'robot'] });
+}
+
+// ─── Periodic REST health check (catches silent token loss) ──────────────────
+let restHealthFailures = 0;
+
+setInterval(async () => {
+  if (!discordReady) return;
+  try {
+    await client.user.fetch();
+    restHealthFailures = 0;
+  } catch (err) {
+    restHealthFailures++;
+    console.error(`REST health check failed (${restHealthFailures}x): ${err.message}`);
+    if (restHealthFailures >= 3) {
+      const msg = `REST health check failed ${restHealthFailures} times in a row: ${err.message}. Exiting for restart.`;
+      console.error(msg);
+      notify.send('Bot REST broken — restarting', msg, { priority: 'urgent', tags: ['rotating_light'] });
+      process.exit(1);
+    }
+  }
+}, 5 * 60_000);
+
+startBot();
