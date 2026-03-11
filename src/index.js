@@ -9,6 +9,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  MessageFlags,
 } = require('discord.js');
 const chrono = require('chrono-node');
 const http = require('http');
@@ -38,7 +39,7 @@ const client = new Client({
 // ─── Bot ready ───────────────────────────────────────────────────────────────
 let schedulerStarted = false;
 
-client.on('ready', () => {
+client.on('clientReady', () => {
   discordReady = true;
   disconnectedSince = null;
   console.log(`Bot is online as ${client.user.tag}`);
@@ -121,7 +122,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const reply = {
       content: 'Something went wrong. Please try again.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     };
 
     if (interaction.replied || interaction.deferred) {
@@ -305,7 +306,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({
           content: `I couldn't understand the time **"${timeInput}"**. Try something like:\n` +
             '• "tomorrow at 3pm"\n• "in 2 hours"\n• "Friday at noon"\n• "March 5 at 10:30am"',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -313,7 +314,7 @@ client.on('interactionCreate', async (interaction) => {
       if (parsedDate <= new Date()) {
         await interaction.reply({
           content: `That time is in the past. Please pick a future time.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -376,14 +377,14 @@ client.on('interactionCreate', async (interaction) => {
         content: permWarning || undefined,
         embeds: [embed],
         components: [buttons],
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     } catch (error) {
       console.error('Error handling schedule modal submit:', error);
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({
           content: 'Something went wrong while scheduling your message. Please try again.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -399,7 +400,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!msg || msg.user_id !== interaction.user.id) {
         await interaction.reply({
           content: `Could not find message **#${messageId}**. It may have already been sent or cancelled.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -418,7 +419,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({
             content: `I couldn't understand the time **"${newTimeInput}"**. The message was not updated.\n\n` +
               'Try something like: "tomorrow at 3pm", "in 2 hours", "Friday at noon"',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -426,7 +427,7 @@ client.on('interactionCreate', async (interaction) => {
         if (parsedDate <= new Date()) {
           await interaction.reply({
             content: `That time is in the past. The message was not updated.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -464,11 +465,11 @@ client.on('interactionCreate', async (interaction) => {
             .setEmoji('🗑️'),
         );
 
-        await interaction.reply({ embeds: [embed], components: [editButtons], ephemeral: true });
+        await interaction.reply({ embeds: [embed], components: [editButtons], flags: MessageFlags.Ephemeral });
       } else {
         await interaction.reply({
           content: `Could not update message **#${messageId}**. It may have already been sent or cancelled.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
@@ -476,7 +477,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({
           content: 'Something went wrong while updating your message. Please try again.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -502,7 +503,7 @@ async function handleScheduleTimezone(interaction) {
           `All your scheduled messages will now use **${timezone}**.`
         ),
     ],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -564,7 +565,7 @@ function buildScheduleListResponse(messages) {
       content: "You don't have any scheduled messages.",
       embeds: [],
       components: [],
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     };
   }
 
@@ -598,7 +599,7 @@ function buildScheduleListResponse(messages) {
     embed.setFooter({ text: `Showing buttons for the first 5 messages. Use /schedule-cancel id:<number> for the rest.` });
   }
 
-  return { embeds: [embed], components, ephemeral: true };
+  return { embeds: [embed], components, flags: MessageFlags.Ephemeral };
 }
 
 // ─── /schedule-list ──────────────────────────────────────────────────────────
@@ -615,12 +616,12 @@ async function handleScheduleCancel(interaction) {
   if (deleted) {
     await interaction.reply({
       content: `Scheduled message **#${id}** has been cancelled.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   } else {
     await interaction.reply({
       content: `Couldn't find a scheduled message **#${id}** that belongs to you.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 }
@@ -695,6 +696,16 @@ const MAX_RETRY_WINDOW = 2 * 60 * 60; // 2 hours
 async function checkScheduledMessages() {
   if (!discordReady) return;
 
+  // Re-affirm the REST token every cycle to guard against silent token loss
+  // after shard reconnects (the setter is a simple assignment — zero overhead)
+  try {
+    client.rest.setToken(process.env.DISCORD_TOKEN);
+    if (!client.token) client.token = process.env.DISCORD_TOKEN;
+  } catch (err) {
+    console.error('Failed to set REST token:', err.message);
+    return;
+  }
+
   const dueMessages = db.getDueMessages();
 
   for (const msg of dueMessages) {
@@ -733,7 +744,7 @@ async function checkScheduledMessages() {
         const dest = threadChannel ? `thread #${threadChannel.name}` : `#${channel.name}`;
         console.log(`Sent scheduled message #${msg.id} to ${dest} as "${msg.user_display_name}" (via webhook)`);
       } catch (webhookError) {
-        console.warn(`Webhook failed for message #${msg.id}: ${webhookError.message}. Falling back to channel.send()...`);
+        console.warn(`Webhook failed for message #${msg.id} (channel ${msg.channel_id}): ${webhookError.message}. Falling back to channel.send()...`);
 
         try {
           const fallbackLabel = msg.user_display_name ? ` (scheduled by ${msg.user_display_name})` : '';
@@ -742,11 +753,11 @@ async function checkScheduledMessages() {
           sent = true;
           console.log(`Sent scheduled message #${msg.id} to #${sendTarget.name} via fallback (channel.send)`);
         } catch (sendError) {
-          console.error(`Fallback also failed for message #${msg.id}:`, sendError.message);
+          console.error(`Fallback also failed for message #${msg.id} (channel ${msg.channel_id}):`, sendError.message);
         }
       }
     } catch (error) {
-      console.error(`Failed to send message #${msg.id}:`, error.message);
+      console.error(`Failed to send message #${msg.id} (channel ${msg.channel_id}):`, error.message);
     }
 
     if (sent) {
