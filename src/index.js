@@ -353,7 +353,7 @@ client.on('interactionCreate', async (interaction) => {
         .setColor(0x57f287)
         .setTitle('Message Scheduled')
         .addFields(
-          { name: 'Message', value: messageText },
+          { name: 'Message', value: messageText.length > 1024 ? messageText.slice(0, 1021) + '...' : messageText },
           { name: 'Channel', value: destinationLabel },
           { name: 'Sends at', value: `<t:${unixTimestamp}:F> (<t:${unixTimestamp}:R>)` },
           { name: 'ID', value: `${id}`, inline: true },
@@ -445,7 +445,7 @@ client.on('interactionCreate', async (interaction) => {
           .setColor(0x57f287)
           .setTitle('Message Updated')
           .addFields(
-            { name: 'Message', value: newMessage },
+            { name: 'Message', value: newMessage.length > 1024 ? newMessage.slice(0, 1021) + '...' : newMessage },
             { name: 'Channel', value: msg.thread_id ? `<#${msg.thread_id}> (thread)` : `<#${msg.channel_id}>` },
             { name: 'Sends at', value: `<t:${newSendAt}:F> (<t:${newSendAt}:R>)` },
             { name: 'ID', value: `${messageId}`, inline: true },
